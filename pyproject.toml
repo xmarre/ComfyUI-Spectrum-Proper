@@ -2,6 +2,7 @@
 name = "comfyui-spectrum-proper"
 description = "Faithful FLUX-focused ComfyUI port of Spectrum spectral feature forecasting."
 version = "0.1.0"
+license = { file = "LICENSE" }
 requires-python = ">=3.10"
 dependencies = []
 classifiers = [
@@ -12,7 +13,13 @@ classifiers = [
   "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
 ]
 
+[project.urls]
+Repository = "https://github.com/xmarre/ComfyUI-Spectrum-Proper"
+Documentation = "https://github.com/xmarre/ComfyUI-Spectrum-Proper/wiki"
+"Bug Tracker" = "https://github.com/xmarre/ComfyUI-Spectrum-Proper/issues"
+
 [tool.comfy]
-PublisherId = "local"
+PublisherId = "xmarre"
 DisplayName = "ComfyUI-Spectrum-Proper"
 Icon = ""
+includes = []
