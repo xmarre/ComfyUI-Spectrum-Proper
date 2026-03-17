@@ -29,6 +29,7 @@ class _ActiveRun:
     total_steps: int
     schedule_values: tuple[float, ...]
     schedule_coords: tuple[float, ...]
+    supports_solver_steps: bool
     next_solver_step_id: int = 0
 
 
@@ -74,6 +75,12 @@ class SpectrumRuntime:
         if self._active_run is None:
             return 0
         return self._active_run.next_solver_step_id
+
+    @property
+    def active_run_supports_solver_steps(self) -> bool:
+        if self._active_run is None:
+            return False
+        return bool(self._active_run.supports_solver_steps)
 
     def _reset_scheduler_state(self) -> None:
         self.curr_ws = float(self.cfg.window_size)
@@ -150,6 +157,7 @@ class SpectrumRuntime:
             total_steps=total_steps,
             schedule_values=schedule_values,
             schedule_coords=schedule_coords,
+            supports_solver_steps=bool(supports_solver_steps),
         )
         self._reset_scheduler_state()
         self.stats.run_id = self.run_id
@@ -250,6 +258,7 @@ class SpectrumRuntime:
     def observe_actual_feature(self, run_id: int, solver_step_id: int, feature: torch.Tensor) -> None:
         step = self._require_active_step(run_id, solver_step_id)
         step.observed_actual = True
+        step.used_forecast = False
         step.predicted_feature = None
         if self.forecast_disabled:
             return

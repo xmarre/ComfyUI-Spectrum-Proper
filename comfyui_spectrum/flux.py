@@ -89,10 +89,21 @@ def _extract_step_context(transformer_options: Dict[str, Any]) -> Optional[tuple
     return runtime, int(run_id), int(solver_step_id), bool(actual_forward)
 
 
-def _copy_model_options_with_step_context(model_options: Dict[str, Any], decision: Dict[str, Any]) -> Dict[str, Any]:
+def _runtime_from_model_options(model_options: Dict[str, Any]) -> Optional[SpectrumRuntime]:
+    transformer_options = (model_options or {}).get("transformer_options") or {}
+    runtime = transformer_options.get("spectrum_runtime")
+    if isinstance(runtime, SpectrumRuntime):
+        return runtime
+    return None
+
+
+def _copy_model_options_with_step_context(
+    model_options: Dict[str, Any], runtime: SpectrumRuntime, decision: Dict[str, Any]
+) -> Dict[str, Any]:
     patched_model_options = dict(model_options or {})
     transformer_options = dict(patched_model_options.get("transformer_options") or {})
     patched_model_options["transformer_options"] = transformer_options
+    transformer_options["spectrum_runtime"] = runtime
     transformer_options["spectrum_run_id"] = decision["run_id"]
     transformer_options["spectrum_solver_step_id"] = decision["solver_step_id"]
     transformer_options["spectrum_time_coord"] = decision["time_coord"]
@@ -103,6 +114,11 @@ def _copy_model_options_with_step_context(model_options: Dict[str, Any], decisio
 
 def _install_sampler_level_wrappers(model: Any, runtime: SpectrumRuntime) -> None:
     options = _ensure_model_options(model)
+    wrapper_state = options.get("_spectrum_sampler_wrapper_state")
+    if not isinstance(wrapper_state, dict):
+        wrapper_state = {}
+        options["_spectrum_sampler_wrapper_state"] = wrapper_state
+    wrapper_state["runtime"] = runtime
     if options.get("_spectrum_sampler_wrappers_installed", False):
         return
 
@@ -120,9 +136,22 @@ def _install_sampler_level_wrappers(model: Any, runtime: SpectrumRuntime) -> Non
         seed=None,
         latent_shapes=None,
     ):
+        wrapper_runtime = wrapper_state.get("runtime")
+        if not isinstance(wrapper_runtime, SpectrumRuntime):
+            return executor(
+                noise,
+                latent_image,
+                sampler,
+                sigmas,
+                denoise_mask,
+                callback,
+                disable_pbar,
+                seed,
+                latent_shapes=latent_shapes,
+            )
         sampler_name = _sampler_name(sampler)
         supports_solver_steps = sampler_name in _SUPPORTED_SINGLE_EVAL_SAMPLERS
-        run_id = runtime.start_run(sigmas, sampler_name, supports_solver_steps=supports_solver_steps)
+        run_id = wrapper_runtime.start_run(sigmas, sampler_name, supports_solver_steps=supports_solver_steps)
         try:
             return executor(
                 noise,
@@ -136,24 +165,36 @@ def _install_sampler_level_wrappers(model: Any, runtime: SpectrumRuntime) -> Non
                 latent_shapes=latent_shapes,
             )
         finally:
-            runtime.end_run(run_id)
+            wrapper_runtime.end_run(run_id)
 
     def predict_noise_wrapper(executor, x, timestep, model_options=None, seed=None):
-        if runtime.active_run_id is None:
-            return executor(x, timestep, model_options or {}, seed)
+        effective_model_options = model_options or {}
+        wrapper_runtime = _runtime_from_model_options(effective_model_options)
+        if wrapper_runtime is None:
+            wrapper_runtime = wrapper_state.get("runtime")
+        if not isinstance(wrapper_runtime, SpectrumRuntime):
+            return executor(x, timestep, effective_model_options, seed)
+        if wrapper_runtime.active_run_id is None:
+            return executor(x, timestep, effective_model_options, seed)
+        if not wrapper_runtime.active_run_supports_solver_steps:
+            return executor(x, timestep, effective_model_options, seed)
 
-        step_id = runtime.next_solver_step_id
-        total_steps = runtime.num_steps()
-        time_coord = runtime.time_coord_for_step(step_id)
-        decision = runtime.begin_solver_step(runtime.active_run_id, step_id, time_coord, total_steps)
-        patched_model_options = _copy_model_options_with_step_context(model_options or {}, decision)
+        step_id = wrapper_runtime.next_solver_step_id
+        total_steps = wrapper_runtime.num_steps()
+        time_coord = wrapper_runtime.time_coord_for_step(step_id)
+        decision = wrapper_runtime.begin_solver_step(wrapper_runtime.active_run_id, step_id, time_coord, total_steps)
+        patched_model_options = _copy_model_options_with_step_context(
+            effective_model_options, wrapper_runtime, decision
+        )
         try:
             return executor(x, timestep, patched_model_options, seed)
         finally:
-            runtime.finalize_solver_step(
+            wrapper_runtime.finalize_solver_step(
                 decision["run_id"],
                 decision["solver_step_id"],
-                used_forecast=runtime.step_used_forecast(decision["run_id"], decision["solver_step_id"]),
+                used_forecast=wrapper_runtime.step_used_forecast(
+                    decision["run_id"], decision["solver_step_id"]
+                ),
             )
 
     comfy.patcher_extension.add_wrapper(

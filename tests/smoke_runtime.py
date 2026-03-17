@@ -110,6 +110,39 @@ def test_forecast_fallback_reconciles_bookkeeping() -> None:
     runtime.end_run(run_id)
 
 
+def test_observe_actual_feature_clears_forecast_latch() -> None:
+    runtime = make_runtime()
+    sample_sigmas = torch.linspace(1.0, 0.0, 51)
+    run_id = runtime.start_run(sample_sigmas, "sample_euler", supports_solver_steps=True)
+    total_steps = len(sample_sigmas) - 1
+
+    for step_id in range(5):
+        decision = runtime.begin_solver_step(
+            run_id,
+            step_id,
+            runtime.time_coord_for_step(step_id),
+            total_steps,
+        )
+        runtime.register_model_hook_call(run_id, step_id, expected_shape=(1, 8, 4))
+        runtime.observe_actual_feature(run_id, step_id, torch.randn(1, 8, 4))
+        runtime.finalize_solver_step(decision["run_id"], decision["solver_step_id"], used_forecast=False)
+
+    decision = runtime.begin_solver_step(
+        run_id,
+        5,
+        runtime.time_coord_for_step(5),
+        total_steps,
+    )
+    runtime.register_model_hook_call(run_id, 5, expected_shape=(1, 8, 4))
+    predicted = runtime.predict_feature(run_id, 5, expected_shape=(1, 8, 4))
+    assert predicted is not None
+    assert runtime.step_used_forecast(run_id, 5) is True
+    runtime.observe_actual_feature(run_id, 5, torch.randn(1, 8, 4))
+    assert runtime.step_used_forecast(run_id, 5) is False
+    runtime.finalize_solver_step(decision["run_id"], decision["solver_step_id"], used_forecast=False)
+    runtime.end_run(run_id)
+
+
 def test_unsupported_sampler_disables_forecast() -> None:
     runtime = make_runtime()
     sample_sigmas = torch.linspace(1.0, 0.0, 51)
@@ -220,6 +253,7 @@ def test_forecaster_respects_nonuniform_coords() -> None:
 def main() -> None:
     test_solver_step_scheduler()
     test_forecast_fallback_reconciles_bookkeeping()
+    test_observe_actual_feature_clears_forecast_latch()
     test_unsupported_sampler_disables_forecast()
     test_inconsistent_hook_shape_disables_forecast()
     test_multiple_hook_calls_disable_forecast()
