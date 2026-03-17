@@ -1,6 +1,6 @@
 # ComfyUI-Spectrum-Proper
 
-Faithful **ComfyUI FLUX** port of **Spectrum** from *Adaptive Spectral Feature Forecasting for Diffusion Sampling Acceleration*.
+Faithful **ComfyUI FLUX** port of [**Spectrum**](https://github.com/hanjq17/Spectrum) from [*Adaptive Spectral Feature Forecasting for Diffusion Sampling Acceleration*](https://arxiv.org/abs/2603.01623).
 
 This repo is intentionally narrow in scope: it implements the **FLUX path properly** instead of trying to be a half-faithful generic accelerator for every backend.
 
@@ -83,6 +83,7 @@ Recommended placement:
 ## Parameters
 
 ### `blend_weight`
+
 Blend between linear local extrapolation and Chebyshev spectral prediction.
 
 - `1.0` = pure spectral predictor
@@ -92,21 +93,25 @@ Blend between linear local extrapolation and Chebyshev spectral prediction.
 The official repo notes that a convex blend improves robustness outside the strict paper setting.
 
 ### `degree`
+
 Chebyshev degree `m`.
 
 Recommended default: `4`
 
 ### `ridge_lambda`
-Ridge regularization `λ` for the coefficient fit.
+
+Ridge regularization `lambda` for the coefficient fit.
 
 Recommended default: `0.1`
 
 ### `window_size`
+
 Initial interval size before a real forward is required again.
 
 Recommended default: `2.0`
 
 ### `flex_window`
+
 How much the interval grows after each post-warmup real forward.
 
 This is the ComfyUI-facing equivalent of the adaptive schedule slope used in the official repo.
@@ -115,21 +120,24 @@ This is the ComfyUI-facing equivalent of the adaptive schedule slope used in the
 - `3.0` = more aggressive speedup
 
 ### `warmup_steps`
+
 Number of initial real forwards before forecasting is allowed.
 
 Recommended default: `5`
 
 ### `max_history`
+
 Cap for cached real-forward feature points used for the fit.
 
 This is an implementation guard, not a paper hyperparameter. With standard FLUX schedules it is usually far above the number of actual cached points anyway.
 
 ### `debug`
+
 Enables lightweight logging during patch install.
 
 ## Recommended settings
 
-### Safer / closer to the paper’s moderate setting
+### Safer / closer to the paper's moderate setting
 
 - `blend_weight = 0.50`
 - `degree = 4`
@@ -150,21 +158,24 @@ Enables lightweight logging during patch install.
 ## Design notes
 
 ### 1. Forecast target is the final hidden FLUX image feature
+
 This repo caches and forecasts the hidden image tokens **after the single-stream blocks and before `final_layer`**.
 
 That is the important architectural choice. Forecasting the final model output directly is less faithful to the official FLUX integration and tends to be less stable.
 
 ### 2. Runtime state is per patched model, not per globally monkey-patched inner model
+
 ComfyUI model clones often share the same underlying diffusion model object. If you close over a runtime object when replacing `forward_orig`, the state can leak between clones.
 
 This repo avoids that by:
 
 - patching the inner FLUX model only once
-- storing the active runtime in each cloned model’s `transformer_options`
+- storing the active runtime in each cloned model's `transformer_options`
 - looking up the runtime dynamically on every call
 - falling back to the original `forward_orig` when Spectrum is not active
 
 ### 3. Step normalization uses detected schedule length
+
 The paper and official code mostly benchmark 50-step runs. ComfyUI users do not.
 
 This repo normalizes the Chebyshev basis against the detected schedule length from `sample_sigmas` instead of hard-coding 50 steps.
@@ -196,25 +207,26 @@ ok
 
 ```text
 ComfyUI-Spectrum-Proper/
-├── __init__.py
-├── nodes.py
-├── pyproject.toml
-├── LICENSE
-├── README.md
-├── comfyui_spectrum/
-│   ├── __init__.py
-│   ├── config.py
-│   ├── forecast.py
-│   ├── flux.py
-│   └── runtime.py
-└── tests/
-    └── smoke_runtime.py
+|-- __init__.py
+|-- nodes.py
+|-- pyproject.toml
+|-- LICENSE
+|-- README.md
+|-- comfyui_spectrum/
+|   |-- __init__.py
+|   |-- config.py
+|   |-- forecast.py
+|   |-- flux.py
+|   `-- runtime.py
+`-- tests/
+    `-- smoke_runtime.py
 ```
 
 ## Credits
 
-- Spectrum paper and official code by Jiaqi Han et al.
-- ComfyUI FLUX integration details adapted against current native ComfyUI FLUX internals
+- [Spectrum](https://github.com/hanjq17/Spectrum) official code and the paper [*Adaptive Spectral Feature Forecasting for Diffusion Sampling Acceleration*](https://arxiv.org/abs/2603.01623) by Jiaqi Han et al.
+- [ComfyUI](https://github.com/comfyanonymous/ComfyUI) for the native FLUX integration this custom node builds on.
+- [FLUX](https://blackforestlabs.ai/flux-1-tools/) by Black Forest Labs as the model family targeted by this port.
 
 ## License
 
