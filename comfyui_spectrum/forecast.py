@@ -8,7 +8,7 @@ import torch
 
 @dataclass(slots=True)
 class _HistoryEntry:
-    step_index: int
+    time_coord: float
     feature: torch.Tensor
 
 
@@ -42,7 +42,7 @@ class ChebyshevSpectrumForecaster:
         needed = max(2, int(min_points) if min_points is not None else self.degree + 1)
         return len(self._history) >= needed
 
-    def update(self, step_index: int, feature: torch.Tensor) -> None:
+    def update(self, time_coord: float, feature: torch.Tensor) -> None:
         feat = feature.detach()
         if self._feature_shape is None:
             self._feature_shape = feat.shape
@@ -53,21 +53,17 @@ class ChebyshevSpectrumForecaster:
                 f"Spectrum feature shape changed from {tuple(self._feature_shape)} to {tuple(feat.shape)}."
             )
 
-        self._history.append(_HistoryEntry(int(step_index), feat))
+        self._history.append(_HistoryEntry(float(time_coord), feat))
         if len(self._history) > self.max_history:
             self._history.pop(0)
 
-    def _tau(self, step_indices: torch.Tensor, total_steps: int) -> torch.Tensor:
-        span = max(int(total_steps) - 1, 1)
-        return (step_indices.to(torch.float32) / float(span)) * 2.0 - 1.0
-
-    def _build_design(self, taus: torch.Tensor, degree: int) -> torch.Tensor:
-        taus = taus.reshape(-1, 1)
-        cols = [torch.ones((taus.shape[0], 1), device=taus.device, dtype=torch.float32)]
+    def _build_design(self, coords: torch.Tensor, degree: int) -> torch.Tensor:
+        coords = coords.reshape(-1, 1).to(torch.float32)
+        cols = [torch.ones((coords.shape[0], 1), device=coords.device, dtype=torch.float32)]
         if degree >= 1:
-            cols.append(taus.to(torch.float32))
+            cols.append(coords)
             for _ in range(2, degree + 1):
-                cols.append(2.0 * taus * cols[-1] - cols[-2])
+                cols.append(2.0 * coords * cols[-1] - cols[-2])
         return torch.cat(cols[: degree + 1], dim=1)
 
     def _solve(self, design: torch.Tensor, features: torch.Tensor) -> torch.Tensor:
@@ -84,44 +80,41 @@ class ChebyshevSpectrumForecaster:
             chol = torch.linalg.cholesky(lhs + jitter * torch.eye(p, device=lhs.device, dtype=lhs.dtype))
         return torch.cholesky_solve(rhs, chol)
 
-    def _linear_prediction(self, step_index: int) -> torch.Tensor:
+    def _linear_prediction(self, time_coord: float) -> torch.Tensor:
         last = self._history[-1]
         if len(self._history) < 2:
             return last.feature.to(torch.float32)
 
         prev = self._history[-2]
-        delta_steps = last.step_index - prev.step_index
-        if delta_steps <= 0:
+        delta_coord = last.time_coord - prev.time_coord
+        if abs(delta_coord) <= 1e-12:
             return last.feature.to(torch.float32)
 
-        k = (float(step_index) - float(last.step_index)) / float(delta_steps)
+        k = (float(time_coord) - float(last.time_coord)) / float(delta_coord)
         last_f = last.feature.to(torch.float32)
         prev_f = prev.feature.to(torch.float32)
         return last_f + k * (last_f - prev_f)
 
-    def predict(self, step_index: int, total_steps: int, blend_weight: float) -> torch.Tensor:
+    def predict(self, time_coord: float, blend_weight: float) -> torch.Tensor:
         if self._feature_shape is None or self._feature_dtype is None or self._device is None:
             raise RuntimeError("Spectrum forecaster has no cached feature history.")
         if not self.ready():
             raise RuntimeError("Spectrum forecaster is not ready yet.")
 
         degree = min(self.degree, len(self._history) - 1)
-        steps = torch.tensor([entry.step_index for entry in self._history], device=self._device, dtype=torch.float32)
+        coords = torch.tensor([entry.time_coord for entry in self._history], device=self._device, dtype=torch.float32)
         features = torch.stack(
             [entry.feature.reshape(-1).to(torch.float32) for entry in self._history],
             dim=0,
         )
 
-        design = self._build_design(self._tau(steps, total_steps), degree)
+        design = self._build_design(coords, degree)
         coeff = self._solve(design, features)
 
-        tau_star = self._tau(
-            torch.tensor([int(step_index)], device=self._device, dtype=torch.float32),
-            total_steps,
-        )
-        design_star = self._build_design(tau_star, degree)
+        coord_star = torch.tensor([float(time_coord)], device=self._device, dtype=torch.float32)
+        design_star = self._build_design(coord_star, degree)
         spectral = (design_star @ coeff).reshape(self._feature_shape)
 
-        linear = self._linear_prediction(step_index).reshape(self._feature_shape)
+        linear = self._linear_prediction(time_coord).reshape(self._feature_shape)
         out = float(blend_weight) * spectral + (1.0 - float(blend_weight)) * linear
         return out.to(dtype=self._feature_dtype)
