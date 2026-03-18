@@ -20,16 +20,19 @@ from comfyui_spectrum.flux import (
 from comfyui_spectrum.runtime import SpectrumRuntime
 
 
-def make_runtime() -> SpectrumRuntime:
-    cfg = SpectrumConfig(
-        blend_weight=0.5,
-        degree=4,
-        ridge_lambda=0.1,
-        window_size=2.0,
-        flex_window=0.75,
-        warmup_steps=5,
-        max_history=128,
-    ).validate()
+def make_runtime(**overrides) -> SpectrumRuntime:
+    cfg_kwargs = {
+        "blend_weight": 0.5,
+        "degree": 4,
+        "ridge_lambda": 0.1,
+        "window_size": 2.0,
+        "flex_window": 0.75,
+        "warmup_steps": 5,
+        "tail_actual_steps": 3,
+        "max_history": 128,
+    }
+    cfg_kwargs.update(overrides)
+    cfg = SpectrumConfig(**cfg_kwargs).validate()
     return SpectrumRuntime(cfg)
 
 
@@ -259,6 +262,54 @@ def test_flux_sampler_contract_only_allows_euler() -> None:
     assert _SUPPORTED_SINGLE_EVAL_SAMPLERS == frozenset({"sample_euler"})
 
 
+def test_tail_actual_steps_force_real_forwards() -> None:
+    runtime = make_runtime(
+        degree=1,
+        ridge_lambda=0.1,
+        window_size=2.0,
+        flex_window=0.75,
+        warmup_steps=2,
+        tail_actual_steps=3,
+        max_history=16,
+    )
+    sample_sigmas = torch.linspace(1.0, 0.0, 9)
+    run_id = runtime.start_run(sample_sigmas, "sample_euler", supports_solver_steps=True)
+    total_steps = len(sample_sigmas) - 1
+
+    for step_id in range(total_steps):
+        decision = runtime.begin_solver_step(
+            run_id,
+            step_id,
+            runtime.time_coord_for_step(step_id),
+            total_steps,
+        )
+        runtime.register_model_hook_call(run_id, step_id, expected_shape=(1, 8, 4))
+
+        if step_id >= total_steps - 3:
+            assert decision["actual_forward"] is True
+            assert runtime.predict_feature(run_id, step_id, expected_shape=(1, 8, 4)) is None
+            runtime.observe_actual_feature(run_id, step_id, torch.randn(1, 8, 4))
+            runtime.finalize_solver_step(run_id, step_id, used_forecast=False)
+            continue
+
+        if step_id < 2:
+            assert decision["actual_forward"] is True
+            runtime.observe_actual_feature(run_id, step_id, torch.randn(1, 8, 4))
+            runtime.finalize_solver_step(run_id, step_id, used_forecast=False)
+            continue
+
+        if decision["actual_forward"]:
+            runtime.observe_actual_feature(run_id, step_id, torch.randn(1, 8, 4))
+            runtime.finalize_solver_step(run_id, step_id, used_forecast=False)
+        else:
+            assert runtime.predict_feature(run_id, step_id, expected_shape=(1, 8, 4)) is not None
+            runtime.finalize_solver_step(run_id, step_id, used_forecast=True)
+
+    assert runtime.stats.forecasted_count > 0
+    assert runtime.stats.actual_forward_count == 6
+    runtime.end_run(run_id)
+
+
 def test_forecast_feature_is_sanitized_before_fp16_final_layer() -> None:
     feature = torch.tensor([float("nan"), float("inf"), float("-inf"), 70000.0, -70000.0, 123.5])
     sanitized = _sanitize_forecast_feature_for_final_layer(feature, torch.float16)
@@ -293,6 +344,7 @@ def main() -> None:
     test_nonuniform_schedule_coords_are_used()
     test_forecaster_respects_nonuniform_coords()
     test_flux_sampler_contract_only_allows_euler()
+    test_tail_actual_steps_force_real_forwards()
     test_forecast_feature_is_sanitized_before_fp16_final_layer()
     test_forecast_feature_sanitization_stats_only_report_real_violations()
     print("ok")
