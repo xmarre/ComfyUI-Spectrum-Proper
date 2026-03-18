@@ -133,7 +133,7 @@ This is an implementation guard, not a paper hyperparameter. With standard FLUX 
 
 ### `debug`
 
-Enables lightweight logging during patch install.
+Enables lightweight logging during patch install and a per-run summary of actual vs. forecasted solver steps.
 
 ## Recommended settings
 
@@ -183,6 +183,7 @@ This repo normalizes the Chebyshev basis against the detected schedule length fr
 ## Known limitations
 
 - This repo currently targets **native ComfyUI FLUX only**.
+- Forecasting is only enabled for deterministic `sample_euler`; samplers that do not preserve a one-`predict_noise`-per-solver-step contract are treated as unsupported.
 - It depends on current ComfyUI FLUX internals staying broadly compatible with the present `forward_orig` signature.
 - It is designed to coexist with standard transformer patch chains, but it is **not guaranteed** to compose with other custom nodes that also replace FLUX `forward_orig` directly.
 - The scheduler is faithful to the official adaptive-window strategy, but one safety approximation is added: forecasting is held back until enough real points exist to fit the chosen Chebyshev degree.

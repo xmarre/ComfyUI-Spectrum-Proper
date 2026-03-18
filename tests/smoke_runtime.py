@@ -12,6 +12,11 @@ if str(ROOT) not in sys.path:
 
 from comfyui_spectrum.config import SpectrumConfig
 from comfyui_spectrum.forecast import ChebyshevSpectrumForecaster
+from comfyui_spectrum.flux import (
+    _SUPPORTED_SINGLE_EVAL_SAMPLERS,
+    _forecast_feature_sanitization_stats,
+    _sanitize_forecast_feature_for_final_layer,
+)
 from comfyui_spectrum.runtime import SpectrumRuntime
 
 
@@ -250,6 +255,34 @@ def test_forecaster_respects_nonuniform_coords() -> None:
     assert torch.allclose(pred, torch.tensor([1.0]), atol=1e-5)
 
 
+def test_flux_sampler_contract_only_allows_euler() -> None:
+    assert _SUPPORTED_SINGLE_EVAL_SAMPLERS == frozenset({"sample_euler"})
+
+
+def test_forecast_feature_is_sanitized_before_fp16_final_layer() -> None:
+    feature = torch.tensor([float("nan"), float("inf"), float("-inf"), 70000.0, -70000.0, 123.5])
+    sanitized = _sanitize_forecast_feature_for_final_layer(feature, torch.float16)
+
+    assert sanitized.dtype == torch.float16
+    assert torch.isfinite(sanitized).all()
+    assert sanitized.tolist() == [0.0, 65504.0, -65504.0, 65504.0, -65504.0, 123.5]
+
+
+def test_forecast_feature_sanitization_stats_only_report_real_violations() -> None:
+    assert _forecast_feature_sanitization_stats(torch.tensor([1.0, 2.0]), torch.float16) is None
+
+    stats = _forecast_feature_sanitization_stats(
+        torch.tensor([float("nan"), float("inf"), -70000.0, 42.0]),
+        torch.float16,
+    )
+    assert stats is not None
+    assert stats["target_dtype"] == "torch.float16"
+    assert stats["had_nonfinite"] is True
+    assert stats["out_of_range"] is True
+    assert stats["before_min"] == -70000.0
+    assert stats["before_max"] == 42.0
+
+
 def main() -> None:
     test_solver_step_scheduler()
     test_forecast_fallback_reconciles_bookkeeping()
@@ -259,6 +292,9 @@ def main() -> None:
     test_multiple_hook_calls_disable_forecast()
     test_nonuniform_schedule_coords_are_used()
     test_forecaster_respects_nonuniform_coords()
+    test_flux_sampler_contract_only_allows_euler()
+    test_forecast_feature_is_sanitized_before_fp16_final_layer()
+    test_forecast_feature_sanitization_stats_only_report_real_violations()
     print("ok")
 
 

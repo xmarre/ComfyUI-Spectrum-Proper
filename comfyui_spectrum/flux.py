@@ -9,12 +9,7 @@ from .config import SpectrumConfig
 from .runtime import SpectrumRuntime
 
 LOG = logging.getLogger(__name__)
-_SUPPORTED_SINGLE_EVAL_SAMPLERS = frozenset(
-    {
-        "sample_euler",
-        "sample_euler_ancestral",
-    }
-)
+_SUPPORTED_SINGLE_EVAL_SAMPLERS = frozenset({"sample_euler"})
 
 
 def _clone_model(model: Any) -> Any:
@@ -59,6 +54,42 @@ def _invert_slices(slices: Sequence[Tuple[int, int]], length: int):
 def _sampler_name(sampler: Any) -> str:
     fn = getattr(sampler, "sampler_function", None)
     return getattr(fn, "__name__", type(sampler).__name__)
+
+
+def _sanitize_forecast_feature_for_final_layer(feature: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
+    if not dtype.is_floating_point:
+        return feature.to(dtype)
+    finfo = torch.finfo(dtype)
+    feature = feature.to(torch.float32)
+    feature = torch.nan_to_num(feature, nan=0.0, posinf=finfo.max, neginf=finfo.min)
+    feature = feature.clamp(min=finfo.min, max=finfo.max)
+    return feature.to(dtype)
+
+
+def _forecast_feature_sanitization_stats(feature: torch.Tensor, dtype: torch.dtype) -> Optional[Dict[str, Any]]:
+    if not dtype.is_floating_point or feature.numel() == 0:
+        return None
+    finfo = torch.finfo(dtype)
+    feature_fp32 = feature.detach().to(torch.float32)
+    finite_mask = torch.isfinite(feature_fp32)
+    had_nonfinite = bool((~torch.isfinite(feature_fp32)).any().item())
+    out_of_range = bool(((feature_fp32 < finfo.min) | (feature_fp32 > finfo.max)).any().item())
+    if not had_nonfinite and not out_of_range:
+        return None
+    if bool(finite_mask.any().item()):
+        finite_feature = feature_fp32[finite_mask]
+        before_min = float(finite_feature.amin().item())
+        before_max = float(finite_feature.amax().item())
+    else:
+        before_min = float("nan")
+        before_max = float("nan")
+    return {
+        "target_dtype": str(dtype),
+        "had_nonfinite": had_nonfinite,
+        "out_of_range": out_of_range,
+        "before_min": before_min,
+        "before_max": before_max,
+    }
 
 
 def _build_branch_signature(transformer_options: Dict[str, Any]) -> Optional[tuple[Any, ...]]:
@@ -165,6 +196,18 @@ def _install_sampler_level_wrappers(model: Any, runtime: SpectrumRuntime) -> Non
                 latent_shapes=latent_shapes,
             )
         finally:
+            if wrapper_runtime.cfg.debug:
+                stats = wrapper_runtime.stats
+                LOG.warning(
+                    "Spectrum run_id=%s sampler=%s total_steps=%s actual=%s forecast=%s disabled=%s reason=%r",
+                    stats.run_id,
+                    stats.sampler_name,
+                    stats.total_steps,
+                    stats.actual_forward_count,
+                    stats.forecasted_count,
+                    stats.forecast_disabled,
+                    stats.disable_reason,
+                )
             wrapper_runtime.end_run(run_id)
 
     def predict_noise_wrapper(executor, x, timestep, model_options=None, seed=None):
@@ -370,10 +413,24 @@ def _run_flux_forward_with_spectrum(
                 expected_shape=expected_feature_shape,
             )
             if pred_feature is not None:
+                if runtime.cfg.debug:
+                    sanitize_stats = _forecast_feature_sanitization_stats(pred_feature, img.dtype)
+                    if sanitize_stats is not None:
+                        LOG.warning(
+                            "Spectrum sanitized forecast run_id=%s step=%s target_dtype=%s had_nonfinite=%s out_of_range=%s before_min=%s before_max=%s",
+                            run_id,
+                            solver_step_id,
+                            sanitize_stats["target_dtype"],
+                            sanitize_stats["had_nonfinite"],
+                            sanitize_stats["out_of_range"],
+                            sanitize_stats["before_min"],
+                            sanitize_stats["before_max"],
+                        )
                 final_kwargs = {}
                 if modulation_dims is not None:
                     final_kwargs["modulation_dims"] = modulation_dims
-                return inner.final_layer(pred_feature.to(img.dtype), vec_orig, **final_kwargs)
+                pred_feature = _sanitize_forecast_feature_for_final_layer(pred_feature, img.dtype)
+                return inner.final_layer(pred_feature, vec_orig, **final_kwargs)
 
     if inner.params.global_modulation:
         vec = (inner.double_stream_modulation_img(vec_orig), inner.double_stream_modulation_txt(txt_vec))
