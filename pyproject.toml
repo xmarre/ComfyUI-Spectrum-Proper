@@ -1,7 +1,7 @@
 [project]
 name = "comfyui-spectrum-proper"
 description = "Faithful FLUX-focused ComfyUI port of Spectrum spectral feature forecasting."
-version = "0.1.2"
+version = "0.1.3"
 license = { file = "LICENSE" }
 requires-python = ">=3.10"
 dependencies = []
