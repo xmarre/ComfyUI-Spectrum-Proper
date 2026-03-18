@@ -125,6 +125,14 @@ Number of initial real forwards before forecasting is allowed.
 
 Recommended default: `5`
 
+### `tail_actual_steps`
+
+Number of final solver steps forced to stay on the real path.
+
+Practical default for quality-sensitive runs: `3`
+
+This protects the refinement tail where late-step forecast bias tends to show up first as smoother microdetail, especially in edit-conditioned runs.
+
 ### `max_history`
 
 Cap for cached real-forward feature points used for the fit.
@@ -145,6 +153,7 @@ Enables lightweight logging during patch install and a per-run summary of actual
 - `window_size = 2.0`
 - `flex_window = 0.75`
 - `warmup_steps = 5`
+- `tail_actual_steps = 3`
 
 ### More aggressive
 
@@ -154,6 +163,7 @@ Enables lightweight logging during patch install and a per-run summary of actual
 - `window_size = 2.0`
 - `flex_window = 3.0`
 - `warmup_steps = 5`
+- `tail_actual_steps = 3`
 
 ## Design notes
 
@@ -187,6 +197,7 @@ This repo normalizes the Chebyshev basis against the detected schedule length fr
 - It depends on current ComfyUI FLUX internals staying broadly compatible with the present `forward_orig` signature.
 - It is designed to coexist with standard transformer patch chains, but it is **not guaranteed** to compose with other custom nodes that also replace FLUX `forward_orig` directly.
 - The scheduler is faithful to the official adaptive-window strategy, but one safety approximation is added: forecasting is held back until enough real points exist to fit the chosen Chebyshev degree.
+- The last few refinement steps can also be reserved as actual-only with `tail_actual_steps` to reduce late-step texture loss.
 - No claims are made here about exact paper speedups inside arbitrary ComfyUI workflows. Sampler choice, guidance path, ControlNet usage, resolution, and other wrappers all affect real wall-clock results.
 
 ## Validation / smoke test

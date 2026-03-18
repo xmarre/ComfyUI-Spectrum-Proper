@@ -141,6 +141,15 @@ class SpectrumRuntime:
             raise RuntimeError(f"Spectrum solver step {solver_step_id} is outside the active schedule.")
         return float(self._active_run.schedule_coords[idx])
 
+    def _is_tail_actual_step(self, solver_step_id: int) -> bool:
+        if self._active_run is None:
+            return False
+        tail_actual_steps = int(self.cfg.tail_actual_steps)
+        if tail_actual_steps <= 0:
+            return False
+        tail_start = max(0, self._active_run.total_steps - tail_actual_steps)
+        return int(solver_step_id) >= tail_start
+
     def start_run(self, sample_sigmas: torch.Tensor, sampler_name: str, *, supports_solver_steps: bool) -> int:
         self.run_id += 1
         schedule_values, schedule_coords = self._build_schedule_coords(sample_sigmas)
@@ -194,15 +203,17 @@ class SpectrumRuntime:
             self._disable_forecasting("solver-step ids are not sequential within the sampling run")
 
         actual_forward = True
+        tail_actual_only = self._is_tail_actual_step(int(solver_step_id))
         if (
             not self.forecast_disabled
+            and not tail_actual_only
             and int(solver_step_id) >= self.cfg.warmup_steps
             and self.forecaster.ready(self.min_fit_points)
         ):
             ws_floor = max(1, int(math.floor(self.curr_ws)))
             actual_forward = ((self.num_consecutive_cached_steps + 1) % ws_floor) == 0
 
-        if self.forecast_disabled or not self.forecaster.ready(self.min_fit_points):
+        if self.forecast_disabled or tail_actual_only or not self.forecaster.ready(self.min_fit_points):
             actual_forward = True
 
         decision = {
@@ -272,6 +283,8 @@ class SpectrumRuntime:
         expected_shape: Optional[tuple[int, ...]] = None,
     ) -> Optional[torch.Tensor]:
         step = self._require_active_step(run_id, solver_step_id)
+        if step.decision["actual_forward"]:
+            return None
         if self.forecast_disabled or not self.forecaster.ready(self.min_fit_points):
             return None
 

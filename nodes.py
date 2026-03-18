@@ -16,6 +16,7 @@ class SpectrumApplyFlux:
                 "window_size": ("FLOAT", {"default": 2.0, "min": 1.0, "max": 16.0, "step": 0.05}),
                 "flex_window": ("FLOAT", {"default": 0.75, "min": 0.0, "max": 8.0, "step": 0.05}),
                 "warmup_steps": ("INT", {"default": 5, "min": 0, "max": 32, "step": 1}),
+                "tail_actual_steps": ("INT", {"default": 3, "min": 0, "max": 32, "step": 1}),
                 "max_history": ("INT", {"default": 128, "min": 8, "max": 512, "step": 1}),
                 "debug": ("BOOLEAN", {"default": False}),
             }
@@ -36,6 +37,7 @@ class SpectrumApplyFlux:
         window_size,
         flex_window,
         warmup_steps,
+        tail_actual_steps,
         max_history,
         debug,
     ):
@@ -51,6 +53,7 @@ class SpectrumApplyFlux:
             window_size=float(window_size),
             flex_window=float(flex_window),
             warmup_steps=int(warmup_steps),
+            tail_actual_steps=int(tail_actual_steps),
             max_history=int(max_history),
             debug=bool(debug),
         ).validate()
