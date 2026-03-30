@@ -229,16 +229,25 @@ def _install_sampler_level_wrappers(model: Any, runtime: SpectrumRuntime) -> Non
         patched_model_options = _copy_model_options_with_step_context(
             effective_model_options, wrapper_runtime, decision
         )
+        step_aborted = False
         try:
             return executor(x, timestep, patched_model_options, seed)
-        finally:
-            wrapper_runtime.finalize_solver_step(
+        except BaseException:
+            step_aborted = True
+            wrapper_runtime.abort_solver_step(
                 decision["run_id"],
                 decision["solver_step_id"],
-                used_forecast=wrapper_runtime.step_used_forecast(
-                    decision["run_id"], decision["solver_step_id"]
-                ),
             )
+            raise
+        finally:
+            if not step_aborted:
+                wrapper_runtime.finalize_solver_step(
+                    decision["run_id"],
+                    decision["solver_step_id"],
+                    used_forecast=wrapper_runtime.step_used_forecast(
+                        decision["run_id"], decision["solver_step_id"]
+                    ),
+                )
 
     comfy.patcher_extension.add_wrapper(
         comfy.patcher_extension.WrappersMP.OUTER_SAMPLE,

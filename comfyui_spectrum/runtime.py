@@ -49,6 +49,8 @@ class _ActiveStep:
     call_used_forecast: list[bool] = field(default_factory=list)
     call_actual_features: list[Optional[torch.Tensor]] = field(default_factory=list)
     call_predicted_features: list[Optional[torch.Tensor]] = field(default_factory=list)
+    predicted_full_feature: Optional[torch.Tensor] = None
+    prediction_row_positions: Optional[dict[int, deque[int]]] = None
 
 
 class SpectrumRuntime:
@@ -118,6 +120,8 @@ class SpectrumRuntime:
         for step in self._active_steps.values():
             step.call_predicted_features = [None] * len(step.call_predicted_features)
             step.call_used_forecast = [False] * len(step.call_used_forecast)
+            step.predicted_full_feature = None
+            step.prediction_row_positions = None
         self.stats.current_window = self.curr_ws
         self.stats.forecast_disabled = True
         self.stats.disable_reason = reason
@@ -338,6 +342,13 @@ class SpectrumRuntime:
         order = [source_positions[int(label)].popleft() for label in target_labels]
         return feature[order, ...]
 
+    @staticmethod
+    def _build_label_positions(labels: tuple[int, ...]) -> dict[int, deque[int]]:
+        positions: dict[int, deque[int]] = defaultdict(deque)
+        for idx, label in enumerate(labels):
+            positions[int(label)].append(idx)
+        return positions
+
     def predict_feature(
         self,
         run_id: int,
@@ -361,36 +372,60 @@ class SpectrumRuntime:
             if history_shape[1:] != target_shape[1:]:
                 self._disable_forecasting("predicted feature shape did not match the current solver-step input")
                 return None
-            if history_shape[0] != target_shape[0]:
+            if self._history_batch_labels is None and history_shape[0] != target_shape[0]:
                 return None
 
-        if step.hook_call_count > 1:
+        if self._history_batch_labels is None and step.hook_call_count > 1:
             return None
 
         if self._history_batch_labels is not None and target_batch_labels is None:
             return None
 
         if step.call_predicted_features[resolved_call_id] is None:
-            predicted_feature = self.forecaster.predict(
-                time_coord=step.time_coord,
-                blend_weight=self.cfg.blend_weight,
-            )
-            if tuple(predicted_feature.shape) != target_shape:
-                self._disable_forecasting("predicted feature shape did not match the current solver-step input")
-                return None
-            if self._history_batch_labels is not None and target_batch_labels is not None:
-                reordered = self._reorder_feature_to_labels(
-                    predicted_feature,
-                    self._history_batch_labels,
-                    target_batch_labels,
-                )
-                if reordered is None:
+            if self._history_batch_labels is not None:
+                if step.predicted_full_feature is None:
+                    predicted_full_feature = self.forecaster.predict(
+                        time_coord=step.time_coord,
+                        blend_weight=self.cfg.blend_weight,
+                    )
+                    if history_shape is not None and tuple(predicted_full_feature.shape) != history_shape:
+                        self._disable_forecasting("predicted feature shape did not match the current solver-step input")
+                        return None
+                    step.predicted_full_feature = predicted_full_feature
+                    step.prediction_row_positions = self._build_label_positions(self._history_batch_labels)
+
+                if target_batch_labels is None or step.prediction_row_positions is None:
                     return None
-                predicted_feature = reordered
+
+                order = []
+                for label in target_batch_labels:
+                    positions = step.prediction_row_positions.get(int(label))
+                    if not positions:
+                        if any(step.call_used_forecast):
+                            self._disable_forecasting("forecasted solver step batch layout changed within one solver step")
+                        return None
+                    order.append(positions.popleft())
+                predicted_feature = step.predicted_full_feature[order, ...]
+            else:
+                predicted_feature = self.forecaster.predict(
+                    time_coord=step.time_coord,
+                    blend_weight=self.cfg.blend_weight,
+                )
+                if tuple(predicted_feature.shape) != target_shape:
+                    self._disable_forecasting("predicted feature shape did not match the current solver-step input")
+                    return None
             step.call_predicted_features[resolved_call_id] = predicted_feature
 
         step.call_used_forecast[resolved_call_id] = True
         return step.call_predicted_features[resolved_call_id]
+
+    def abort_solver_step(self, run_id: int, solver_step_id: int) -> None:
+        step = self._require_active_step(run_id, solver_step_id)
+        step.call_predicted_features = [None] * len(step.call_predicted_features)
+        step.call_used_forecast = [False] * len(step.call_used_forecast)
+        step.predicted_full_feature = None
+        step.prediction_row_positions = None
+        self._active_steps.pop(int(solver_step_id), None)
 
     def finalize_solver_step(self, run_id: int, solver_step_id: int, *, used_forecast: bool) -> None:
         step = self._require_active_step(run_id, solver_step_id)
@@ -404,14 +439,14 @@ class SpectrumRuntime:
             self._disable_forecasting("solver step requested an actual forward but no actual feature was observed")
         if not observed_actual and not used_forecast_any:
             self._disable_forecasting("solver step finished without an actual feature or a forecasted feature")
+        if any(not (obs or used) for obs, used in zip(step.call_observed_actual, step.call_used_forecast)):
+            self._disable_forecasting("solver step finished with an incomplete model-hook call")
 
         if observed_actual and used_forecast_any:
             self._disable_forecasting("solver step mixed forecasted and actual model-hook paths")
             used_forecast_any = False
 
         if used_forecast_any:
-            if step.hook_call_count > 1:
-                self._disable_forecasting("forecasted solver step re-entered the model hook")
             self.num_consecutive_cached_steps += 1
             self.stats.forecasted_count += 1
             step.decision["actual_forward"] = False
