@@ -327,6 +327,38 @@ def test_split_forecast_step_uses_spectrum_across_subcalls() -> None:
     runtime.end_run(run_id)
 
 
+def test_split_forecast_step_without_layout_labels_uses_sequential_full_prediction() -> None:
+    runtime = make_runtime()
+    sample_sigmas = torch.linspace(1.0, 0.0, 51)
+    run_id = runtime.start_run(sample_sigmas, "sample_euler", supports_solver_steps=True)
+    total_steps = len(sample_sigmas) - 1
+
+    for step_id in range(5):
+        runtime.begin_solver_step(
+            run_id,
+            step_id,
+            runtime.time_coord_for_step(step_id),
+            total_steps,
+        )
+        call_id = runtime.register_model_hook_call(run_id, step_id, expected_shape=(2, 8, 4), branch_signature=None)
+        runtime.observe_actual_feature(run_id, step_id, torch.randn(2, 8, 4), call_id=call_id)
+        runtime.finalize_solver_step(run_id, step_id, used_forecast=False)
+
+    decision = runtime.begin_solver_step(
+        run_id,
+        5,
+        runtime.time_coord_for_step(5),
+        total_steps,
+    )
+    assert decision["actual_forward"] is False
+    first_id = runtime.register_model_hook_call(run_id, 5, expected_shape=(1, 8, 4), branch_signature=None)
+    assert runtime.predict_feature(run_id, 5, expected_shape=(1, 8, 4), call_id=first_id) is not None
+    second_id = runtime.register_model_hook_call(run_id, 5, expected_shape=(1, 8, 4), branch_signature=None)
+    assert runtime.predict_feature(run_id, 5, expected_shape=(1, 8, 4), call_id=second_id) is not None
+    runtime.finalize_solver_step(decision["run_id"], decision["solver_step_id"], used_forecast=True)
+    runtime.end_run(run_id)
+
+
 def test_duplicate_batch_labels_can_be_reordered_for_forecast() -> None:
     runtime = make_runtime()
     sample_sigmas = torch.linspace(1.0, 0.0, 51)
@@ -541,6 +573,7 @@ def main() -> None:
     test_nonbatch_shape_mismatch_disables_forecast()
     test_multiple_hook_calls_are_aggregated_on_actual_steps()
     test_split_forecast_step_uses_spectrum_across_subcalls()
+    test_split_forecast_step_without_layout_labels_uses_sequential_full_prediction()
     test_duplicate_batch_labels_can_be_reordered_for_forecast()
     test_topology_change_disables_forecast()
     test_mixed_batch_layout_presence_disables_forecast()
