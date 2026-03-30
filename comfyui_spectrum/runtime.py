@@ -263,11 +263,10 @@ class SpectrumRuntime:
         elif tail_shape != step.feature_tail_shape:
             self._disable_forecasting("model-hook feature shape changed within one solver step")
 
-        if branch_signature is not None:
-            for prev_branch_signature in step.call_branch_signatures:
-                if prev_branch_signature is not None and prev_branch_signature != branch_signature:
-                    self._disable_forecasting("model-hook branch signature changed within one solver step")
-                    break
+        for prev_branch_signature in step.call_branch_signatures:
+            if prev_branch_signature != branch_signature:
+                self._disable_forecasting("model-hook branch signature changed within one solver step")
+                break
 
         step.call_expected_shapes.append(shape)
         step.call_branch_signatures.append(branch_signature)
@@ -336,11 +335,11 @@ class SpectrumRuntime:
     def finalize_solver_step(self, run_id: int, solver_step_id: int, *, used_forecast: bool) -> None:
         step = self._require_active_step(run_id, solver_step_id)
         requested_actual_forward = bool(step.decision["actual_forward"])
-        if bool(used_forecast) and step.call_used_forecast:
-            step.call_used_forecast[-1] = True
 
         observed_actual = any(step.call_observed_actual)
         used_forecast_any = any(step.call_used_forecast)
+        if bool(used_forecast) and not observed_actual:
+            used_forecast_any = True
         if step.decision["actual_forward"] and not observed_actual:
             self._disable_forecasting("solver step requested an actual forward but no actual feature was observed")
         if not observed_actual and not used_forecast_any:
