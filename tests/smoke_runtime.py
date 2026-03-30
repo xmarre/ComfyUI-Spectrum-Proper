@@ -177,14 +177,20 @@ def test_batch_split_falls_back_to_actual_without_disabling_run() -> None:
     total_steps = len(sample_sigmas) - 1
 
     for step_id in range(5):
-        decision = runtime.begin_solver_step(
+        runtime.begin_solver_step(
             run_id,
             step_id,
             runtime.time_coord_for_step(step_id),
             total_steps,
         )
-        runtime.register_model_hook_call(run_id, step_id, expected_shape=(2, 8, 4))
-        runtime.observe_actual_feature(run_id, step_id, torch.randn(2, 8, 4))
+        first_id = runtime.register_model_hook_call(
+            run_id, step_id, expected_shape=(1, 8, 4), branch_signature=(("cond_or_uncond", (1,)),)
+        )
+        runtime.observe_actual_feature(run_id, step_id, torch.ones(1, 8, 4) * 10.0, call_id=first_id)
+        second_id = runtime.register_model_hook_call(
+            run_id, step_id, expected_shape=(1, 8, 4), branch_signature=(("cond_or_uncond", (0,)),)
+        )
+        runtime.observe_actual_feature(run_id, step_id, torch.ones(1, 8, 4) * 20.0, call_id=second_id)
         runtime.finalize_solver_step(run_id, step_id, used_forecast=False)
 
     decision = runtime.begin_solver_step(
@@ -194,22 +200,13 @@ def test_batch_split_falls_back_to_actual_without_disabling_run() -> None:
         total_steps,
     )
     assert decision["actual_forward"] is False
-    call_id = runtime.register_model_hook_call(run_id, 5, expected_shape=(1, 8, 4))
-    predicted = runtime.predict_feature(run_id, 5, expected_shape=(1, 8, 4), call_id=call_id)
-    assert predicted is None
-    assert runtime.stats.forecast_disabled is False
-    runtime.observe_actual_feature(run_id, 5, torch.randn(1, 8, 4), call_id=call_id)
-    runtime.register_model_hook_call(run_id, 5, expected_shape=(1, 8, 4))
-    runtime.observe_actual_feature(run_id, 5, torch.randn(1, 8, 4))
-    runtime.finalize_solver_step(
-        decision["run_id"],
-        decision["solver_step_id"],
-        used_forecast=not decision["actual_forward"],
+    call_id = runtime.register_model_hook_call(
+        run_id, 5, expected_shape=(2, 8, 4), branch_signature=(("cond_or_uncond", (0, 1)),)
     )
-
-    assert runtime.stats.forecasted_count == 0
-    assert runtime.stats.actual_forward_count == 6
-    assert decision["actual_forward"] is True
+    predicted = runtime.predict_feature(run_id, 5, expected_shape=(2, 8, 4), call_id=call_id)
+    assert predicted is not None
+    assert predicted.shape == (2, 8, 4)
+    runtime.finalize_solver_step(decision["run_id"], decision["solver_step_id"], used_forecast=True)
     runtime.end_run(run_id)
 
 
@@ -220,7 +217,7 @@ def test_nonbatch_shape_mismatch_disables_forecast() -> None:
     total_steps = len(sample_sigmas) - 1
 
     for step_id in range(5):
-        decision = runtime.begin_solver_step(
+        runtime.begin_solver_step(
             run_id,
             step_id,
             runtime.time_coord_for_step(step_id),
@@ -253,7 +250,7 @@ def test_multiple_hook_calls_are_aggregated_on_actual_steps() -> None:
     total_steps = len(sample_sigmas) - 1
 
     for step_id in range(5):
-        decision = runtime.begin_solver_step(
+        runtime.begin_solver_step(
             run_id,
             step_id,
             runtime.time_coord_for_step(step_id),
@@ -279,7 +276,46 @@ def test_multiple_hook_calls_are_aggregated_on_actual_steps() -> None:
     runtime.end_run(run_id)
 
 
-def test_multicall_branch_signature_change_disables_forecast() -> None:
+def test_duplicate_batch_labels_can_be_reordered_for_forecast() -> None:
+    runtime = make_runtime()
+    sample_sigmas = torch.linspace(1.0, 0.0, 51)
+    run_id = runtime.start_run(sample_sigmas, "sample_euler", supports_solver_steps=True)
+    total_steps = len(sample_sigmas) - 1
+
+    for step_id in range(5):
+        runtime.begin_solver_step(
+            run_id,
+            step_id,
+            runtime.time_coord_for_step(step_id),
+            total_steps,
+        )
+        first_id = runtime.register_model_hook_call(
+            run_id, step_id, expected_shape=(2, 8, 4), branch_signature=(("cond_or_uncond", (1, 1)),)
+        )
+        runtime.observe_actual_feature(run_id, step_id, torch.ones(2, 8, 4) * 10.0, call_id=first_id)
+        second_id = runtime.register_model_hook_call(
+            run_id, step_id, expected_shape=(2, 8, 4), branch_signature=(("cond_or_uncond", (0, 0)),)
+        )
+        runtime.observe_actual_feature(run_id, step_id, torch.ones(2, 8, 4) * 20.0, call_id=second_id)
+        runtime.finalize_solver_step(run_id, step_id, used_forecast=False)
+
+    decision = runtime.begin_solver_step(
+        run_id,
+        5,
+        runtime.time_coord_for_step(5),
+        total_steps,
+    )
+    call_id = runtime.register_model_hook_call(
+        run_id, 5, expected_shape=(4, 8, 4), branch_signature=(("cond_or_uncond", (0, 0, 1, 1)),)
+    )
+    predicted = runtime.predict_feature(run_id, 5, expected_shape=(4, 8, 4), call_id=call_id)
+    assert predicted is not None
+    assert predicted.shape == (4, 8, 4)
+    runtime.finalize_solver_step(decision["run_id"], decision["solver_step_id"], used_forecast=True)
+    runtime.end_run(run_id)
+
+
+def test_topology_change_disables_forecast() -> None:
     runtime = make_runtime()
     sample_sigmas = torch.linspace(1.0, 0.0, 51)
     run_id = runtime.start_run(sample_sigmas, "sample_euler", supports_solver_steps=True)
@@ -292,11 +328,11 @@ def test_multicall_branch_signature_change_disables_forecast() -> None:
         total_steps,
     )
     first_id = runtime.register_model_hook_call(
-        run_id, 0, expected_shape=(1, 8, 4), branch_signature=(("cond_or_uncond", (0, 1)),)
+        run_id, 0, expected_shape=(1, 8, 4), branch_signature=(("uuids_len", 1), ("cond_or_uncond", (0,)))
     )
     runtime.observe_actual_feature(run_id, 0, torch.randn(1, 8, 4), call_id=first_id)
     second_id = runtime.register_model_hook_call(
-        run_id, 0, expected_shape=(1, 8, 4), branch_signature=(("cond_or_uncond", (1, 0)),)
+        run_id, 0, expected_shape=(1, 8, 4), branch_signature=(("uuids_len", 2), ("cond_or_uncond", (1,)))
     )
     assert runtime.stats.forecast_disabled is True
     assert runtime.stats.disable_reason == "model-hook branch signature changed within one solver step"
@@ -305,7 +341,7 @@ def test_multicall_branch_signature_change_disables_forecast() -> None:
     runtime.end_run(run_id)
 
 
-def test_multicall_none_to_branch_signature_change_disables_forecast() -> None:
+def test_mixed_batch_layout_presence_disables_forecast() -> None:
     runtime = make_runtime()
     sample_sigmas = torch.linspace(1.0, 0.0, 51)
     run_id = runtime.start_run(sample_sigmas, "sample_euler", supports_solver_steps=True)
@@ -320,36 +356,12 @@ def test_multicall_none_to_branch_signature_change_disables_forecast() -> None:
     first_id = runtime.register_model_hook_call(run_id, 0, expected_shape=(1, 8, 4), branch_signature=None)
     runtime.observe_actual_feature(run_id, 0, torch.randn(1, 8, 4), call_id=first_id)
     second_id = runtime.register_model_hook_call(
-        run_id, 0, expected_shape=(1, 8, 4), branch_signature=(("cond_or_uncond", (0, 1)),)
+        run_id, 0, expected_shape=(1, 8, 4), branch_signature=(("cond_or_uncond", (1,)),)
     )
-    assert runtime.stats.forecast_disabled is True
-    assert runtime.stats.disable_reason == "model-hook branch signature changed within one solver step"
     runtime.observe_actual_feature(run_id, 0, torch.randn(1, 8, 4), call_id=second_id)
     runtime.finalize_solver_step(decision["run_id"], decision["solver_step_id"], used_forecast=False)
-    runtime.end_run(run_id)
-
-
-def test_multicall_branch_to_none_signature_change_disables_forecast() -> None:
-    runtime = make_runtime()
-    sample_sigmas = torch.linspace(1.0, 0.0, 51)
-    run_id = runtime.start_run(sample_sigmas, "sample_euler", supports_solver_steps=True)
-    total_steps = len(sample_sigmas) - 1
-
-    decision = runtime.begin_solver_step(
-        run_id,
-        0,
-        runtime.time_coord_for_step(0),
-        total_steps,
-    )
-    first_id = runtime.register_model_hook_call(
-        run_id, 0, expected_shape=(1, 8, 4), branch_signature=(("cond_or_uncond", (0, 1)),)
-    )
-    runtime.observe_actual_feature(run_id, 0, torch.randn(1, 8, 4), call_id=first_id)
-    second_id = runtime.register_model_hook_call(run_id, 0, expected_shape=(1, 8, 4), branch_signature=None)
     assert runtime.stats.forecast_disabled is True
-    assert runtime.stats.disable_reason == "model-hook branch signature changed within one solver step"
-    runtime.observe_actual_feature(run_id, 0, torch.randn(1, 8, 4), call_id=second_id)
-    runtime.finalize_solver_step(decision["run_id"], decision["solver_step_id"], used_forecast=False)
+    assert runtime.stats.disable_reason == "model-hook batch layout changed within one solver step"
     runtime.end_run(run_id)
 
 
@@ -460,9 +472,9 @@ def main() -> None:
     test_batch_split_falls_back_to_actual_without_disabling_run()
     test_nonbatch_shape_mismatch_disables_forecast()
     test_multiple_hook_calls_are_aggregated_on_actual_steps()
-    test_multicall_branch_signature_change_disables_forecast()
-    test_multicall_none_to_branch_signature_change_disables_forecast()
-    test_multicall_branch_to_none_signature_change_disables_forecast()
+    test_duplicate_batch_labels_can_be_reordered_for_forecast()
+    test_topology_change_disables_forecast()
+    test_mixed_batch_layout_presence_disables_forecast()
     test_nonuniform_schedule_coords_are_used()
     test_forecaster_respects_nonuniform_coords()
     test_flux_sampler_contract_only_allows_euler()
