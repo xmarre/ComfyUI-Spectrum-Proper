@@ -53,6 +53,8 @@ class _ActiveStep:
     prediction_row_positions: Optional[dict[Any, deque[int]]] = None
     prediction_next_row: int = 0
     used_forecast_any: bool = False
+    actual_feature_device: Optional[torch.device] = None
+    actual_feature_dtype: Optional[torch.dtype] = None
 
 
 class SpectrumRuntime:
@@ -125,6 +127,8 @@ class SpectrumRuntime:
             step.predicted_full_feature = None
             step.prediction_row_positions = None
             step.prediction_next_row = 0
+            step.actual_feature_device = None
+            step.actual_feature_dtype = None
         self.stats.current_window = self.curr_ws
         self.stats.forecast_disabled = True
         self.stats.disable_reason = reason
@@ -346,7 +350,11 @@ class SpectrumRuntime:
         step.call_used_forecast[resolved_call_id] = False
         step.used_forecast_any = any(step.call_used_forecast)
         step.call_predicted_features[resolved_call_id] = None
-        step.call_actual_features[resolved_call_id] = feature.detach()
+        if step.actual_feature_device is None:
+            step.actual_feature_device = feature.device
+        if step.actual_feature_dtype is None:
+            step.actual_feature_dtype = feature.dtype
+        step.call_actual_features[resolved_call_id] = feature.detach().to(device="cpu", copy=True)
 
     @staticmethod
     def _reorder_feature_to_labels(
@@ -459,6 +467,8 @@ class SpectrumRuntime:
         step.predicted_full_feature = None
         step.prediction_row_positions = None
         step.prediction_next_row = 0
+        step.actual_feature_device = None
+        step.actual_feature_dtype = None
         self._active_steps.pop(int(solver_step_id), None)
 
     def finalize_solver_step(self, run_id: int, solver_step_id: int, *, used_forecast: bool) -> None:
@@ -536,6 +546,21 @@ class SpectrumRuntime:
                                 combined_labels = self._history_batch_labels
 
                         if not self.forecast_disabled:
+                            target_device = (
+                                self.forecaster._device
+                                if self.forecaster._device is not None
+                                else step.actual_feature_device
+                            )
+                            target_dtype = (
+                                self.forecaster._feature_dtype
+                                if self.forecaster._feature_dtype is not None
+                                else step.actual_feature_dtype
+                            )
+                            if target_device is not None:
+                                combined_feature = combined_feature.to(
+                                    device=target_device,
+                                    dtype=target_dtype if target_dtype is not None else combined_feature.dtype,
+                                )
                             self.forecaster.update(step.time_coord, combined_feature)
                     except ValueError:
                         self._disable_forecasting("combined actual feature shape changed across solver steps")
