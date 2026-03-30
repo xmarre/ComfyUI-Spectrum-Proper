@@ -257,7 +257,7 @@ class SpectrumRuntime:
 
     def step_used_forecast(self, run_id: int, solver_step_id: int) -> bool:
         step = self._require_active_step(run_id, solver_step_id)
-        return any(step.call_used_forecast)
+        return step.used_forecast_any or any(step.call_used_forecast)
 
     @staticmethod
     def _split_branch_signature(
