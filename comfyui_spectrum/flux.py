@@ -398,9 +398,10 @@ def _run_flux_forward_with_spectrum(
         extra_kwargs["modulation_dims_img"] = modulation_dims
         txt_vec = vec[:batch]
 
+    call_id: Optional[int] = None
     if step_ctx is not None:
         _, run_id, solver_step_id, actual_forward = step_ctx
-        runtime.register_model_hook_call(
+        call_id = runtime.register_model_hook_call(
             run_id,
             solver_step_id,
             expected_shape=expected_feature_shape,
@@ -411,6 +412,7 @@ def _run_flux_forward_with_spectrum(
                 run_id,
                 solver_step_id,
                 expected_shape=expected_feature_shape,
+                call_id=call_id,
             )
             if pred_feature is not None:
                 if runtime.cfg.debug:
@@ -551,7 +553,7 @@ def _run_flux_forward_with_spectrum(
 
     prehead_feature = img[:, txt.shape[1] :, ...]
     if run_id is not None and solver_step_id is not None:
-        runtime.observe_actual_feature(run_id, solver_step_id, prehead_feature)
+        runtime.observe_actual_feature(run_id, solver_step_id, prehead_feature, call_id=call_id)
 
     final_kwargs = {}
     if modulation_dims is not None:

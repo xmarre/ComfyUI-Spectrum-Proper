@@ -40,6 +40,9 @@ Supported:
 - LoRAs on the normal model path
 - standard `transformer_options` patch chains
 - standard FLUX control residuals
+- ComfyUI runs that sometimes split one logical solver step into multiple internal FLUX calls
+
+For split-step runs, Spectrum now aggregates actual hidden features across the sub-calls and falls back to the real path for any forecast step whose current call shape no longer matches the cached full-batch history. This avoids false run-wide disables while keeping the forecast path conservative.
 
 Not included:
 
