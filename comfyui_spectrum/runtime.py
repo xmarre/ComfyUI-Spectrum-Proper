@@ -376,10 +376,9 @@ class SpectrumRuntime:
             if history_shape[1:] != target_shape[1:]:
                 self._disable_forecasting("predicted feature shape did not match the current solver-step input")
                 return None
-            needs_full_prediction = (
-                (self._history_batch_labels is not None)
-                or (history_shape[0] != target_shape[0])
-            )
+            if self._history_batch_labels is None and history_shape[0] != target_shape[0]:
+                return None
+            needs_full_prediction = (self._history_batch_labels is not None)
 
         if (
             self._history_batch_labels is None
@@ -420,17 +419,6 @@ class SpectrumRuntime:
                             return None
                         order.append(positions.popleft())
                     predicted_feature = step.predicted_full_feature[order, ...]
-                elif self._history_batch_labels is None:
-                    if step.prediction_row_positions is not None:
-                        return None
-                    start = step.prediction_next_row
-                    end = start + target_shape[0]
-                    if step.predicted_full_feature is None or end > step.predicted_full_feature.shape[0]:
-                        if any(step.call_used_forecast):
-                            self._disable_forecasting("forecasted solver step batch layout changed within one solver step")
-                        return None
-                    predicted_feature = step.predicted_full_feature[start:end, ...]
-                    step.prediction_next_row = end
                 else:
                     self._disable_forecasting("forecasted solver step batch layout changed within one solver step")
                     return None
@@ -471,16 +459,15 @@ class SpectrumRuntime:
             self._disable_forecasting("solver step finished without an actual feature or a forecasted feature")
         if any(not (obs or used) for obs, used in zip(step.call_observed_actual, step.call_used_forecast)):
             self._disable_forecasting("solver step finished with an incomplete model-hook call")
-        if used_forecast_any and step.predicted_full_feature is not None:
+        if observed_actual and used_forecast_any:
+            self._disable_forecasting("solver step mixed forecasted and actual model-hook paths")
+            used_forecast_any = False
+        elif used_forecast_any and step.predicted_full_feature is not None:
             if step.prediction_row_positions is not None:
                 if any(positions for positions in step.prediction_row_positions.values()):
                     self._disable_forecasting("forecasted solver step batch layout changed within one solver step")
             elif step.prediction_next_row != step.predicted_full_feature.shape[0]:
                 self._disable_forecasting("forecasted solver step batch layout changed within one solver step")
-
-        if observed_actual and used_forecast_any:
-            self._disable_forecasting("solver step mixed forecasted and actual model-hook paths")
-            used_forecast_any = False
 
         if used_forecast_any:
             self.num_consecutive_cached_steps += 1
