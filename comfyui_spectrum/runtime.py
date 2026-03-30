@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
@@ -39,9 +40,11 @@ class _ActiveStep:
     time_coord: float
     decision: Dict[str, Any]
     feature_tail_shape: Optional[tuple[int, ...]] = None
+    topology_signature: Optional[tuple[Any, ...]] = None
     hook_call_count: int = 0
     call_expected_shapes: list[tuple[int, ...]] = field(default_factory=list)
     call_branch_signatures: list[Optional[tuple[Any, ...]]] = field(default_factory=list)
+    call_batch_labels: list[Optional[tuple[int, ...]]] = field(default_factory=list)
     call_observed_actual: list[bool] = field(default_factory=list)
     call_used_forecast: list[bool] = field(default_factory=list)
     call_actual_features: list[Optional[torch.Tensor]] = field(default_factory=list)
@@ -60,6 +63,7 @@ class SpectrumRuntime:
         self.stats = RuntimeStats(current_window=float(self.cfg.window_size))
         self._active_run: Optional[_ActiveRun] = None
         self._active_steps: Dict[int, _ActiveStep] = {}
+        self._history_batch_labels: Optional[tuple[int, ...]] = None
         self._reset_scheduler_state()
 
     @property
@@ -91,6 +95,7 @@ class SpectrumRuntime:
         self.forecast_disable_reason: Optional[str] = None
         self.forecaster.reset()
         self._active_steps = {}
+        self._history_batch_labels = None
         self.stats.current_window = float(self.cfg.window_size)
         self.stats.forecast_disabled = False
         self.stats.disable_reason = None
@@ -109,6 +114,7 @@ class SpectrumRuntime:
         self.num_consecutive_cached_steps = 0
         self.curr_ws = float(self.cfg.window_size)
         self.forecaster.reset()
+        self._history_batch_labels = None
         for step in self._active_steps.values():
             step.call_predicted_features = [None] * len(step.call_predicted_features)
             step.call_used_forecast = [False] * len(step.call_used_forecast)
@@ -246,6 +252,24 @@ class SpectrumRuntime:
         step = self._require_active_step(run_id, solver_step_id)
         return any(step.call_used_forecast)
 
+    @staticmethod
+    def _split_branch_signature(
+        branch_signature: Optional[tuple[Any, ...]],
+    ) -> tuple[tuple[Any, ...], Optional[tuple[int, ...]]]:
+        if branch_signature is None:
+            return (), None
+        topology_entries: list[Any] = []
+        batch_labels: Optional[tuple[int, ...]] = None
+        for entry in branch_signature:
+            if isinstance(entry, tuple) and len(entry) == 2 and entry[0] == "cond_or_uncond":
+                try:
+                    batch_labels = tuple(int(v) for v in entry[1])
+                except Exception:
+                    batch_labels = tuple(entry[1])
+            else:
+                topology_entries.append(entry)
+        return tuple(topology_entries), batch_labels
+
     def register_model_hook_call(
         self,
         run_id: int,
@@ -257,19 +281,24 @@ class SpectrumRuntime:
         step = self._require_active_step(run_id, solver_step_id)
         shape = tuple(expected_shape)
         tail_shape = shape[1:]
+        topology_signature, batch_labels = self._split_branch_signature(branch_signature)
         step.hook_call_count += 1
         if step.feature_tail_shape is None:
             step.feature_tail_shape = tail_shape
         elif tail_shape != step.feature_tail_shape:
             self._disable_forecasting("model-hook feature shape changed within one solver step")
 
-        for prev_branch_signature in step.call_branch_signatures:
-            if prev_branch_signature != branch_signature:
-                self._disable_forecasting("model-hook branch signature changed within one solver step")
-                break
+        if step.topology_signature is None:
+            step.topology_signature = topology_signature
+        elif topology_signature != step.topology_signature:
+            self._disable_forecasting("model-hook branch signature changed within one solver step")
+
+        if batch_labels is not None and len(batch_labels) != shape[0]:
+            batch_labels = None
 
         step.call_expected_shapes.append(shape)
         step.call_branch_signatures.append(branch_signature)
+        step.call_batch_labels.append(batch_labels)
         step.call_observed_actual.append(False)
         step.call_used_forecast.append(False)
         step.call_actual_features.append(None)
@@ -291,6 +320,24 @@ class SpectrumRuntime:
         step.call_predicted_features[resolved_call_id] = None
         step.call_actual_features[resolved_call_id] = feature.detach()
 
+    @staticmethod
+    def _reorder_feature_to_labels(
+        feature: torch.Tensor,
+        source_labels: tuple[int, ...],
+        target_labels: tuple[int, ...],
+    ) -> Optional[torch.Tensor]:
+        if feature.shape[0] != len(source_labels) or len(source_labels) != len(target_labels):
+            return None
+        if source_labels == target_labels:
+            return feature
+        if sorted(source_labels) != sorted(target_labels):
+            return None
+        source_positions: dict[int, deque[int]] = defaultdict(deque)
+        for idx, label in enumerate(source_labels):
+            source_positions[int(label)].append(idx)
+        order = [source_positions[int(label)].popleft() for label in target_labels]
+        return feature[order, ...]
+
     def predict_feature(
         self,
         run_id: int,
@@ -307,6 +354,7 @@ class SpectrumRuntime:
             return None
 
         target_shape = tuple(expected_shape) if expected_shape is not None else step.call_expected_shapes[resolved_call_id]
+        target_batch_labels = step.call_batch_labels[resolved_call_id]
         history_shape = self.forecaster.feature_shape
         if history_shape is not None:
             history_shape = tuple(history_shape)
@@ -319,6 +367,9 @@ class SpectrumRuntime:
         if step.hook_call_count > 1:
             return None
 
+        if self._history_batch_labels is not None and target_batch_labels is None:
+            return None
+
         if step.call_predicted_features[resolved_call_id] is None:
             predicted_feature = self.forecaster.predict(
                 time_coord=step.time_coord,
@@ -327,6 +378,15 @@ class SpectrumRuntime:
             if tuple(predicted_feature.shape) != target_shape:
                 self._disable_forecasting("predicted feature shape did not match the current solver-step input")
                 return None
+            if self._history_batch_labels is not None and target_batch_labels is not None:
+                reordered = self._reorder_feature_to_labels(
+                    predicted_feature,
+                    self._history_batch_labels,
+                    target_batch_labels,
+                )
+                if reordered is None:
+                    return None
+                predicted_feature = reordered
             step.call_predicted_features[resolved_call_id] = predicted_feature
 
         step.call_used_forecast[resolved_call_id] = True
@@ -357,12 +417,54 @@ class SpectrumRuntime:
             step.decision["actual_forward"] = False
         else:
             actual_parts = [part for part in step.call_actual_features if part is not None]
+            actual_labels = [labels for labels, part in zip(step.call_batch_labels, step.call_actual_features) if part is not None]
             if actual_parts and not self.forecast_disabled:
-                combined_feature = actual_parts[0] if len(actual_parts) == 1 else torch.cat(actual_parts, dim=0)
-                try:
-                    self.forecaster.update(step.time_coord, combined_feature)
-                except ValueError:
-                    self._disable_forecasting("combined actual feature shape changed across solver steps")
+                labeled_parts = [labels is not None for labels in actual_labels]
+                combined_feature: Optional[torch.Tensor] = None
+                combined_labels: Optional[tuple[int, ...]] = None
+                if any(labeled_parts) and not all(labeled_parts):
+                    self._disable_forecasting("model-hook batch layout changed within one solver step")
+                elif all(labeled_parts):
+                    rows: list[tuple[int, int, torch.Tensor]] = []
+                    arrival = 0
+                    for labels, part in zip(actual_labels, actual_parts):
+                        assert labels is not None
+                        if part.shape[0] != len(labels):
+                            self._disable_forecasting("model-hook batch layout changed within one solver step")
+                            break
+                        for row_idx, label in enumerate(labels):
+                            rows.append((int(label), arrival, part[row_idx : row_idx + 1]))
+                            arrival += 1
+                    if rows:
+                        rows.sort(key=lambda item: (item[0], item[1]))
+                        combined_feature = torch.cat([row for _, _, row in rows], dim=0)
+                        combined_labels = tuple(label for label, _, _ in rows)
+                else:
+                    combined_feature = actual_parts[0] if len(actual_parts) == 1 else torch.cat(actual_parts, dim=0)
+                    combined_labels = None
+
+                if combined_feature is not None:
+                    try:
+                        if self._history_batch_labels is None:
+                            self._history_batch_labels = combined_labels
+                        elif combined_labels is None:
+                            self._disable_forecasting("combined actual feature batch layout changed across solver steps")
+                        else:
+                            reordered = self._reorder_feature_to_labels(
+                                combined_feature,
+                                combined_labels,
+                                self._history_batch_labels,
+                            )
+                            if reordered is None:
+                                self._disable_forecasting("combined actual feature batch layout changed across solver steps")
+                            else:
+                                combined_feature = reordered
+                                combined_labels = self._history_batch_labels
+
+                        if not self.forecast_disabled:
+                            self.forecaster.update(step.time_coord, combined_feature)
+                    except ValueError:
+                        self._disable_forecasting("combined actual feature shape changed across solver steps")
             if (
                 requested_actual_forward
                 and not self.forecast_disabled
