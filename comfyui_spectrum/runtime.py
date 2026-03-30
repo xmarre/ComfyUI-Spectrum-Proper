@@ -419,9 +419,8 @@ class SpectrumRuntime:
                             return None
                         order.append(positions.popleft())
                     predicted_feature = step.predicted_full_feature[order, ...]
-                else:
-                    if step.prediction_row_positions is not None and any(step.call_used_forecast):
-                        self._disable_forecasting("forecasted solver step batch layout changed within one solver step")
+                elif self._history_batch_labels is None:
+                    if step.prediction_row_positions is not None:
                         return None
                     start = step.prediction_next_row
                     end = start + target_shape[0]
@@ -431,6 +430,9 @@ class SpectrumRuntime:
                         return None
                     predicted_feature = step.predicted_full_feature[start:end, ...]
                     step.prediction_next_row = end
+                else:
+                    self._disable_forecasting("forecasted solver step batch layout changed within one solver step")
+                    return None
             else:
                 predicted_feature = self.forecaster.predict(
                     time_coord=step.time_coord,
