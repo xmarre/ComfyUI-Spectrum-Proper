@@ -38,6 +38,10 @@ class ChebyshevSpectrumForecaster:
         self.ridge_lambda = float(ridge_lambda)
         self.max_history = int(max_history)
 
+    @property
+    def feature_shape(self) -> Optional[torch.Size]:
+        return self._feature_shape
+
     def ready(self, min_points: Optional[int] = None) -> bool:
         needed = max(2, int(min_points) if min_points is not None else self.degree + 1)
         return len(self._history) >= needed

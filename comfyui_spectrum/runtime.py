@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
 import torch
@@ -38,12 +38,14 @@ class _ActiveStep:
     solver_step_id: int
     time_coord: float
     decision: Dict[str, Any]
-    expected_shape: Optional[tuple[int, ...]] = None
-    branch_signature: Optional[tuple[Any, ...]] = None
+    feature_tail_shape: Optional[tuple[int, ...]] = None
     hook_call_count: int = 0
-    observed_actual: bool = False
-    used_forecast: bool = False
-    predicted_feature: Optional[torch.Tensor] = None
+    call_expected_shapes: list[tuple[int, ...]] = field(default_factory=list)
+    call_branch_signatures: list[Optional[tuple[Any, ...]]] = field(default_factory=list)
+    call_observed_actual: list[bool] = field(default_factory=list)
+    call_used_forecast: list[bool] = field(default_factory=list)
+    call_actual_features: list[Optional[torch.Tensor]] = field(default_factory=list)
+    call_predicted_features: list[Optional[torch.Tensor]] = field(default_factory=list)
 
 
 class SpectrumRuntime:
@@ -108,7 +110,8 @@ class SpectrumRuntime:
         self.curr_ws = float(self.cfg.window_size)
         self.forecaster.reset()
         for step in self._active_steps.values():
-            step.predicted_feature = None
+            step.call_predicted_features = [None] * len(step.call_predicted_features)
+            step.call_used_forecast = [False] * len(step.call_used_forecast)
         self.stats.current_window = self.curr_ws
         self.stats.forecast_disabled = True
         self.stats.disable_reason = reason
@@ -240,7 +243,8 @@ class SpectrumRuntime:
         return step.decision
 
     def step_used_forecast(self, run_id: int, solver_step_id: int) -> bool:
-        return self._require_active_step(run_id, solver_step_id).used_forecast
+        step = self._require_active_step(run_id, solver_step_id)
+        return any(step.call_used_forecast)
 
     def register_model_hook_call(
         self,
@@ -249,31 +253,43 @@ class SpectrumRuntime:
         *,
         expected_shape: tuple[int, ...],
         branch_signature: Optional[tuple[Any, ...]] = None,
-    ) -> None:
+    ) -> int:
         step = self._require_active_step(run_id, solver_step_id)
+        shape = tuple(expected_shape)
+        tail_shape = shape[1:]
         step.hook_call_count += 1
-        if step.hook_call_count > 1:
-            self._disable_forecasting("multiple model-hook calls observed within one solver step")
-        if step.expected_shape is None:
-            step.expected_shape = tuple(expected_shape)
-        elif tuple(expected_shape) != step.expected_shape:
+        if step.feature_tail_shape is None:
+            step.feature_tail_shape = tail_shape
+        elif tail_shape != step.feature_tail_shape:
             self._disable_forecasting("model-hook feature shape changed within one solver step")
 
-        if branch_signature is None:
-            return
-        if step.branch_signature is None:
-            step.branch_signature = branch_signature
-        elif branch_signature != step.branch_signature:
-            self._disable_forecasting("model-hook branch signature changed within one solver step")
+        for prev_branch_signature in step.call_branch_signatures:
+            if prev_branch_signature != branch_signature:
+                self._disable_forecasting("model-hook branch signature changed within one solver step")
+                break
 
-    def observe_actual_feature(self, run_id: int, solver_step_id: int, feature: torch.Tensor) -> None:
+        step.call_expected_shapes.append(shape)
+        step.call_branch_signatures.append(branch_signature)
+        step.call_observed_actual.append(False)
+        step.call_used_forecast.append(False)
+        step.call_actual_features.append(None)
+        step.call_predicted_features.append(None)
+        return len(step.call_expected_shapes) - 1
+
+    def observe_actual_feature(
+        self,
+        run_id: int,
+        solver_step_id: int,
+        feature: torch.Tensor,
+        *,
+        call_id: Optional[int] = None,
+    ) -> None:
         step = self._require_active_step(run_id, solver_step_id)
-        step.observed_actual = True
-        step.used_forecast = False
-        step.predicted_feature = None
-        if self.forecast_disabled:
-            return
-        self.forecaster.update(step.time_coord, feature)
+        resolved_call_id = self._resolve_call_id(step, call_id)
+        step.call_observed_actual[resolved_call_id] = True
+        step.call_used_forecast[resolved_call_id] = False
+        step.call_predicted_features[resolved_call_id] = None
+        step.call_actual_features[resolved_call_id] = feature.detach()
 
     def predict_feature(
         self,
@@ -281,41 +297,77 @@ class SpectrumRuntime:
         solver_step_id: int,
         *,
         expected_shape: Optional[tuple[int, ...]] = None,
+        call_id: Optional[int] = None,
     ) -> Optional[torch.Tensor]:
         step = self._require_active_step(run_id, solver_step_id)
+        resolved_call_id = self._resolve_call_id(step, call_id)
         if step.decision["actual_forward"]:
             return None
         if self.forecast_disabled or not self.forecaster.ready(self.min_fit_points):
             return None
 
-        if step.predicted_feature is None:
-            step.predicted_feature = self.forecaster.predict(
+        target_shape = tuple(expected_shape) if expected_shape is not None else step.call_expected_shapes[resolved_call_id]
+        history_shape = self.forecaster.feature_shape
+        if history_shape is not None:
+            history_shape = tuple(history_shape)
+            if history_shape[1:] != target_shape[1:]:
+                self._disable_forecasting("predicted feature shape did not match the current solver-step input")
+                return None
+            if history_shape[0] != target_shape[0]:
+                return None
+
+        if step.hook_call_count > 1:
+            return None
+
+        if step.call_predicted_features[resolved_call_id] is None:
+            predicted_feature = self.forecaster.predict(
                 time_coord=step.time_coord,
                 blend_weight=self.cfg.blend_weight,
             )
+            if tuple(predicted_feature.shape) != target_shape:
+                self._disable_forecasting("predicted feature shape did not match the current solver-step input")
+                return None
+            step.call_predicted_features[resolved_call_id] = predicted_feature
 
-        if expected_shape is not None and tuple(step.predicted_feature.shape) != tuple(expected_shape):
-            self._disable_forecasting("predicted feature shape did not match the current solver-step input")
-            return None
-
-        step.used_forecast = True
-        return step.predicted_feature
+        step.call_used_forecast[resolved_call_id] = True
+        return step.call_predicted_features[resolved_call_id]
 
     def finalize_solver_step(self, run_id: int, solver_step_id: int, *, used_forecast: bool) -> None:
         step = self._require_active_step(run_id, solver_step_id)
-        if bool(used_forecast):
-            step.used_forecast = True
-        if step.decision["actual_forward"] and not step.observed_actual:
+        requested_actual_forward = bool(step.decision["actual_forward"])
+
+        observed_actual = any(step.call_observed_actual)
+        used_forecast_any = any(step.call_used_forecast)
+        if bool(used_forecast) and not observed_actual:
+            used_forecast_any = True
+        if step.decision["actual_forward"] and not observed_actual:
             self._disable_forecasting("solver step requested an actual forward but no actual feature was observed")
-        if not step.observed_actual and not step.used_forecast:
+        if not observed_actual and not used_forecast_any:
             self._disable_forecasting("solver step finished without an actual feature or a forecasted feature")
 
-        if step.used_forecast:
+        if observed_actual and used_forecast_any:
+            self._disable_forecasting("solver step mixed forecasted and actual model-hook paths")
+            used_forecast_any = False
+
+        if used_forecast_any:
+            if step.hook_call_count > 1:
+                self._disable_forecasting("forecasted solver step re-entered the model hook")
             self.num_consecutive_cached_steps += 1
             self.stats.forecasted_count += 1
             step.decision["actual_forward"] = False
         else:
-            if not self.forecast_disabled and step.solver_step_id >= self.cfg.warmup_steps:
+            actual_parts = [part for part in step.call_actual_features if part is not None]
+            if actual_parts and not self.forecast_disabled:
+                combined_feature = actual_parts[0] if len(actual_parts) == 1 else torch.cat(actual_parts, dim=0)
+                try:
+                    self.forecaster.update(step.time_coord, combined_feature)
+                except ValueError:
+                    self._disable_forecasting("combined actual feature shape changed across solver steps")
+            if (
+                requested_actual_forward
+                and not self.forecast_disabled
+                and step.solver_step_id >= self.cfg.warmup_steps
+            ):
                 self.curr_ws = round(self.curr_ws + float(self.cfg.flex_window), 6)
             self.num_consecutive_cached_steps = 0
             self.stats.actual_forward_count += 1
@@ -323,6 +375,15 @@ class SpectrumRuntime:
 
         self.stats.current_window = self.curr_ws
         self._active_steps.pop(int(solver_step_id), None)
+
+    @staticmethod
+    def _resolve_call_id(step: _ActiveStep, call_id: Optional[int]) -> int:
+        if not step.call_expected_shapes:
+            raise RuntimeError("Spectrum solver step has no active model-hook call.")
+        resolved = len(step.call_expected_shapes) - 1 if call_id is None else int(call_id)
+        if resolved < 0 or resolved >= len(step.call_expected_shapes):
+            raise RuntimeError(f"Spectrum solver-step call id {resolved} is not active.")
+        return resolved
 
     def _require_active_step(self, run_id: int, solver_step_id: int) -> _ActiveStep:
         if self._active_run is None or self._active_run.run_id != int(run_id):
