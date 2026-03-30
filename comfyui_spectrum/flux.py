@@ -103,7 +103,10 @@ def _build_branch_signature(transformer_options: Dict[str, Any]) -> Optional[tup
 
     uuids = transformer_options.get("uuids")
     if uuids is not None:
-        signature.append(("uuids_len", len(uuids)))
+        try:
+            signature.append(("uuids", tuple(uuids)))
+        except Exception:
+            signature.append(("uuids", tuple(str(u) for u in uuids)))
 
     if not signature:
         return None

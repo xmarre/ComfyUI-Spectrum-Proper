@@ -44,13 +44,13 @@ class _ActiveStep:
     hook_call_count: int = 0
     call_expected_shapes: list[tuple[int, ...]] = field(default_factory=list)
     call_branch_signatures: list[Optional[tuple[Any, ...]]] = field(default_factory=list)
-    call_batch_labels: list[Optional[tuple[int, ...]]] = field(default_factory=list)
+    call_batch_labels: list[Optional[tuple[Any, ...]]] = field(default_factory=list)
     call_observed_actual: list[bool] = field(default_factory=list)
     call_used_forecast: list[bool] = field(default_factory=list)
     call_actual_features: list[Optional[torch.Tensor]] = field(default_factory=list)
     call_predicted_features: list[Optional[torch.Tensor]] = field(default_factory=list)
     predicted_full_feature: Optional[torch.Tensor] = None
-    prediction_row_positions: Optional[dict[int, deque[int]]] = None
+    prediction_row_positions: Optional[dict[Any, deque[int]]] = None
     prediction_next_row: int = 0
     used_forecast_any: bool = False
 
@@ -67,7 +67,7 @@ class SpectrumRuntime:
         self.stats = RuntimeStats(current_window=float(self.cfg.window_size))
         self._active_run: Optional[_ActiveRun] = None
         self._active_steps: Dict[int, _ActiveStep] = {}
-        self._history_batch_labels: Optional[tuple[int, ...]] = None
+        self._history_batch_labels: Optional[tuple[Any, ...]] = None
         self._reset_scheduler_state()
 
     @property
@@ -262,20 +262,34 @@ class SpectrumRuntime:
     @staticmethod
     def _split_branch_signature(
         branch_signature: Optional[tuple[Any, ...]],
-    ) -> tuple[tuple[Any, ...], Optional[tuple[int, ...]]]:
+    ) -> tuple[tuple[Any, ...], Optional[tuple[Any, ...]], bool]:
         if branch_signature is None:
-            return (), None
+            return (), None, False
         topology_entries: list[Any] = []
-        batch_labels: Optional[tuple[int, ...]] = None
+        cond_labels: Optional[tuple[Any, ...]] = None
+        uuids: Optional[tuple[Any, ...]] = None
         for entry in branch_signature:
             if isinstance(entry, tuple) and len(entry) == 2 and entry[0] == "cond_or_uncond":
                 try:
-                    batch_labels = tuple(int(v) for v in entry[1])
+                    cond_labels = tuple(int(v) for v in entry[1])
                 except Exception:
-                    batch_labels = tuple(entry[1])
+                    cond_labels = tuple(entry[1])
+            elif isinstance(entry, tuple) and len(entry) == 2 and entry[0] == "uuids":
+                try:
+                    uuids = tuple(entry[1])
+                except Exception:
+                    uuids = tuple(str(v) for v in entry[1])
             else:
                 topology_entries.append(entry)
-        return tuple(topology_entries), batch_labels
+
+        if cond_labels is not None and uuids is not None and len(cond_labels) == len(uuids):
+            batch_labels = tuple((cond_labels[i], uuids[i]) for i in range(len(cond_labels)))
+            return tuple(topology_entries), batch_labels, True
+        if cond_labels is not None:
+            return tuple(topology_entries), cond_labels, False
+        if uuids is not None:
+            return tuple(topology_entries), tuple(("uuid", u) for u in uuids), True
+        return tuple(topology_entries), None, False
 
     def register_model_hook_call(
         self,
@@ -288,7 +302,7 @@ class SpectrumRuntime:
         step = self._require_active_step(run_id, solver_step_id)
         shape = tuple(expected_shape)
         tail_shape = shape[1:]
-        topology_signature, batch_labels = self._split_branch_signature(branch_signature)
+        topology_signature, batch_labels, can_expand_batch_labels = self._split_branch_signature(branch_signature)
         step.hook_call_count += 1
         if step.feature_tail_shape is None:
             step.feature_tail_shape = tail_shape
@@ -300,8 +314,14 @@ class SpectrumRuntime:
         elif topology_signature != step.topology_signature:
             self._disable_forecasting("model-hook branch signature changed within one solver step")
 
-        if batch_labels is not None and len(batch_labels) != shape[0]:
-            batch_labels = None
+        if batch_labels is not None:
+            if len(batch_labels) == shape[0]:
+                pass
+            elif can_expand_batch_labels and len(batch_labels) > 0 and shape[0] % len(batch_labels) == 0:
+                rows_per_label = shape[0] // len(batch_labels)
+                batch_labels = tuple(label for label in batch_labels for _ in range(rows_per_label))
+            else:
+                batch_labels = None
 
         step.call_expected_shapes.append(shape)
         step.call_branch_signatures.append(branch_signature)
@@ -324,14 +344,15 @@ class SpectrumRuntime:
         resolved_call_id = self._resolve_call_id(step, call_id)
         step.call_observed_actual[resolved_call_id] = True
         step.call_used_forecast[resolved_call_id] = False
+        step.used_forecast_any = any(step.call_used_forecast)
         step.call_predicted_features[resolved_call_id] = None
         step.call_actual_features[resolved_call_id] = feature.detach()
 
     @staticmethod
     def _reorder_feature_to_labels(
         feature: torch.Tensor,
-        source_labels: tuple[int, ...],
-        target_labels: tuple[int, ...],
+        source_labels: tuple[Any, ...],
+        target_labels: tuple[Any, ...],
     ) -> Optional[torch.Tensor]:
         if feature.shape[0] != len(source_labels) or len(source_labels) != len(target_labels):
             return None
@@ -339,17 +360,17 @@ class SpectrumRuntime:
             return feature
         if sorted(source_labels) != sorted(target_labels):
             return None
-        source_positions: dict[int, deque[int]] = defaultdict(deque)
+        source_positions: dict[Any, deque[int]] = defaultdict(deque)
         for idx, label in enumerate(source_labels):
-            source_positions[int(label)].append(idx)
-        order = [source_positions[int(label)].popleft() for label in target_labels]
+            source_positions[label].append(idx)
+        order = [source_positions[label].popleft() for label in target_labels]
         return feature[order, ...]
 
     @staticmethod
-    def _build_label_positions(labels: tuple[int, ...]) -> dict[int, deque[int]]:
-        positions: dict[int, deque[int]] = defaultdict(deque)
+    def _build_label_positions(labels: tuple[Any, ...]) -> dict[Any, deque[int]]:
+        positions: dict[Any, deque[int]] = defaultdict(deque)
         for idx, label in enumerate(labels):
-            positions[int(label)].append(idx)
+            positions[label].append(idx)
         return positions
 
     def predict_feature(
@@ -407,20 +428,15 @@ class SpectrumRuntime:
 
                 if target_batch_labels is not None and self._history_batch_labels is not None:
                     if step.prediction_row_positions is None:
-                        if any(step.call_used_forecast):
-                            self._disable_forecasting("forecasted solver step batch layout changed within one solver step")
                         return None
                     order = []
                     for label in target_batch_labels:
-                        positions = step.prediction_row_positions.get(int(label))
+                        positions = step.prediction_row_positions.get(label)
                         if not positions:
-                            if any(step.call_used_forecast):
-                                self._disable_forecasting("forecasted solver step batch layout changed within one solver step")
                             return None
                         order.append(positions.popleft())
                     predicted_feature = step.predicted_full_feature[order, ...]
                 else:
-                    self._disable_forecasting("forecasted solver step batch layout changed within one solver step")
                     return None
             else:
                 predicted_feature = self.forecaster.predict(
@@ -483,7 +499,7 @@ class SpectrumRuntime:
                 if any(labeled_parts) and not all(labeled_parts):
                     self._disable_forecasting("model-hook batch layout changed within one solver step")
                 elif all(labeled_parts):
-                    rows: list[tuple[int, int, torch.Tensor]] = []
+                    rows: list[tuple[Any, int, torch.Tensor]] = []
                     arrival = 0
                     for labels, part in zip(actual_labels, actual_parts):
                         assert labels is not None
@@ -491,7 +507,7 @@ class SpectrumRuntime:
                             self._disable_forecasting("model-hook batch layout changed within one solver step")
                             break
                         for row_idx, label in enumerate(labels):
-                            rows.append((int(label), arrival, part[row_idx : row_idx + 1]))
+                            rows.append((label, arrival, part[row_idx : row_idx + 1]))
                             arrival += 1
                     if rows:
                         rows.sort(key=lambda item: (item[0], item[1]))

@@ -54,7 +54,7 @@ def test_solver_step_scheduler() -> None:
             run_id,
             step_id,
             expected_shape=(1, 8, 4),
-            branch_signature=(("cond_or_uncond", (0, 1)),),
+            branch_signature=(("cond_or_uncond", (0, 1)), ("uuids", ("u0", "u1"))),
         )
         runtime.observe_actual_feature(decision["run_id"], decision["solver_step_id"], torch.randn(1, 8, 4))
         runtime.finalize_solver_step(decision["run_id"], decision["solver_step_id"], used_forecast=False)
@@ -69,7 +69,7 @@ def test_solver_step_scheduler() -> None:
         run_id,
         5,
         expected_shape=(1, 8, 4),
-        branch_signature=(("cond_or_uncond", (0, 1)),),
+        branch_signature=(("cond_or_uncond", (0, 1)), ("uuids", ("u0", "u1"))),
     )
     predicted = runtime.predict_feature(run_id, 5, expected_shape=(1, 8, 4))
     assert predicted is not None
@@ -184,11 +184,11 @@ def test_batch_split_falls_back_to_actual_without_disabling_run() -> None:
             total_steps,
         )
         first_id = runtime.register_model_hook_call(
-            run_id, step_id, expected_shape=(1, 8, 4), branch_signature=(("cond_or_uncond", (1,)),)
+            run_id, step_id, expected_shape=(1, 8, 4), branch_signature=(("cond_or_uncond", (1,)), ("uuids", ("u1",)))
         )
         runtime.observe_actual_feature(run_id, step_id, torch.ones(1, 8, 4) * 10.0, call_id=first_id)
         second_id = runtime.register_model_hook_call(
-            run_id, step_id, expected_shape=(1, 8, 4), branch_signature=(("cond_or_uncond", (0,)),)
+            run_id, step_id, expected_shape=(1, 8, 4), branch_signature=(("cond_or_uncond", (0,)), ("uuids", ("u0",)))
         )
         runtime.observe_actual_feature(run_id, step_id, torch.ones(1, 8, 4) * 20.0, call_id=second_id)
         runtime.finalize_solver_step(run_id, step_id, used_forecast=False)
@@ -201,7 +201,7 @@ def test_batch_split_falls_back_to_actual_without_disabling_run() -> None:
     )
     assert decision["actual_forward"] is False
     call_id = runtime.register_model_hook_call(
-        run_id, 5, expected_shape=(2, 8, 4), branch_signature=(("cond_or_uncond", (0, 1)),)
+        run_id, 5, expected_shape=(2, 8, 4), branch_signature=(("cond_or_uncond", (0, 1)), ("uuids", ("u0", "u1")))
     )
     predicted = runtime.predict_feature(run_id, 5, expected_shape=(2, 8, 4), call_id=call_id)
     assert predicted is not None
@@ -290,11 +290,11 @@ def test_split_forecast_step_uses_spectrum_across_subcalls() -> None:
             total_steps,
         )
         first_id = runtime.register_model_hook_call(
-            run_id, step_id, expected_shape=(1, 8, 4), branch_signature=(("cond_or_uncond", (1,)),)
+            run_id, step_id, expected_shape=(1, 8, 4), branch_signature=(("cond_or_uncond", (1,)), ("uuids", ("u1",)))
         )
         runtime.observe_actual_feature(run_id, step_id, torch.ones(1, 8, 4) * 10.0, call_id=first_id)
         second_id = runtime.register_model_hook_call(
-            run_id, step_id, expected_shape=(1, 8, 4), branch_signature=(("cond_or_uncond", (0,)),)
+            run_id, step_id, expected_shape=(1, 8, 4), branch_signature=(("cond_or_uncond", (0,)), ("uuids", ("u0",)))
         )
         runtime.observe_actual_feature(run_id, step_id, torch.ones(1, 8, 4) * 20.0, call_id=second_id)
         runtime.finalize_solver_step(run_id, step_id, used_forecast=False)
@@ -308,14 +308,14 @@ def test_split_forecast_step_uses_spectrum_across_subcalls() -> None:
     assert decision["actual_forward"] is False
 
     first_id = runtime.register_model_hook_call(
-        run_id, 5, expected_shape=(1, 8, 4), branch_signature=(("cond_or_uncond", (0,)),)
+        run_id, 5, expected_shape=(1, 8, 4), branch_signature=(("cond_or_uncond", (0,)), ("uuids", ("u0",)))
     )
     first_pred = runtime.predict_feature(run_id, 5, expected_shape=(1, 8, 4), call_id=first_id)
     assert first_pred is not None
     assert first_pred.shape == (1, 8, 4)
 
     second_id = runtime.register_model_hook_call(
-        run_id, 5, expected_shape=(1, 8, 4), branch_signature=(("cond_or_uncond", (1,)),)
+        run_id, 5, expected_shape=(1, 8, 4), branch_signature=(("cond_or_uncond", (1,)), ("uuids", ("u1",)))
     )
     second_pred = runtime.predict_feature(run_id, 5, expected_shape=(1, 8, 4), call_id=second_id)
     assert second_pred is not None
@@ -363,6 +363,38 @@ def test_split_forecast_step_without_layout_labels_falls_back_to_actual() -> Non
     runtime.end_run(run_id)
 
 
+
+def test_chunk_level_cond_or_uncond_and_uuid_labels_expand_to_rows_for_split_forecast() -> None:
+    runtime = make_runtime()
+    sample_sigmas = torch.linspace(1.0, 0.0, 51)
+    run_id = runtime.start_run(sample_sigmas, "sample_euler", supports_solver_steps=True)
+    total_steps = len(sample_sigmas) - 1
+
+    for step_id in range(5):
+        runtime.begin_solver_step(run_id, step_id, runtime.time_coord_for_step(step_id), total_steps)
+        call_id = runtime.register_model_hook_call(
+            run_id,
+            step_id,
+            expected_shape=(4, 8, 4),
+            branch_signature=(("cond_or_uncond", (1, 0)), ("uuids", ("u1", "u0"))),
+        )
+        runtime.observe_actual_feature(run_id, step_id, torch.randn(4, 8, 4), call_id=call_id)
+        runtime.finalize_solver_step(run_id, step_id, used_forecast=False)
+
+    decision = runtime.begin_solver_step(run_id, 5, runtime.time_coord_for_step(5), total_steps)
+    assert decision["actual_forward"] is False
+    first_id = runtime.register_model_hook_call(
+        run_id, 5, expected_shape=(2, 8, 4), branch_signature=(("cond_or_uncond", (0,)), ("uuids", ("u0",))),
+    )
+    assert runtime.predict_feature(run_id, 5, expected_shape=(2, 8, 4), call_id=first_id) is not None
+    second_id = runtime.register_model_hook_call(
+        run_id, 5, expected_shape=(2, 8, 4), branch_signature=(("cond_or_uncond", (1,)), ("uuids", ("u1",))),
+    )
+    assert runtime.predict_feature(run_id, 5, expected_shape=(2, 8, 4), call_id=second_id) is not None
+    runtime.finalize_solver_step(decision["run_id"], decision["solver_step_id"], used_forecast=True)
+    assert runtime.stats.forecasted_count == 1
+    runtime.end_run(run_id)
+
 def test_duplicate_batch_labels_can_be_reordered_for_forecast() -> None:
     runtime = make_runtime()
     sample_sigmas = torch.linspace(1.0, 0.0, 51)
@@ -377,11 +409,11 @@ def test_duplicate_batch_labels_can_be_reordered_for_forecast() -> None:
             total_steps,
         )
         first_id = runtime.register_model_hook_call(
-            run_id, step_id, expected_shape=(2, 8, 4), branch_signature=(("cond_or_uncond", (1, 1)),)
+            run_id, step_id, expected_shape=(2, 8, 4), branch_signature=(("cond_or_uncond", (1, 1)), ("uuids", ("u1a", "u1b")))
         )
         runtime.observe_actual_feature(run_id, step_id, torch.ones(2, 8, 4) * 10.0, call_id=first_id)
         second_id = runtime.register_model_hook_call(
-            run_id, step_id, expected_shape=(2, 8, 4), branch_signature=(("cond_or_uncond", (0, 0)),)
+            run_id, step_id, expected_shape=(2, 8, 4), branch_signature=(("cond_or_uncond", (0, 0)), ("uuids", ("u0a", "u0b")))
         )
         runtime.observe_actual_feature(run_id, step_id, torch.ones(2, 8, 4) * 20.0, call_id=second_id)
         runtime.finalize_solver_step(run_id, step_id, used_forecast=False)
@@ -393,7 +425,7 @@ def test_duplicate_batch_labels_can_be_reordered_for_forecast() -> None:
         total_steps,
     )
     call_id = runtime.register_model_hook_call(
-        run_id, 5, expected_shape=(4, 8, 4), branch_signature=(("cond_or_uncond", (0, 0, 1, 1)),)
+        run_id, 5, expected_shape=(4, 8, 4), branch_signature=(("cond_or_uncond", (0, 0, 1, 1)), ("uuids", ("u0a", "u0b", "u1a", "u1b")))
     )
     predicted = runtime.predict_feature(run_id, 5, expected_shape=(4, 8, 4), call_id=call_id)
     assert predicted is not None
@@ -415,11 +447,11 @@ def test_topology_change_disables_forecast() -> None:
         total_steps,
     )
     first_id = runtime.register_model_hook_call(
-        run_id, 0, expected_shape=(1, 8, 4), branch_signature=(("uuids_len", 1), ("cond_or_uncond", (0,)))
+        run_id, 0, expected_shape=(1, 8, 4), branch_signature=(("hooks_id", 1), ("cond_or_uncond", (0,)), ("uuids", ("u0",)))
     )
     runtime.observe_actual_feature(run_id, 0, torch.randn(1, 8, 4), call_id=first_id)
     second_id = runtime.register_model_hook_call(
-        run_id, 0, expected_shape=(1, 8, 4), branch_signature=(("uuids_len", 2), ("cond_or_uncond", (1,)))
+        run_id, 0, expected_shape=(1, 8, 4), branch_signature=(("hooks_id", 2), ("cond_or_uncond", (1,)), ("uuids", ("u1",)))
     )
     assert runtime.stats.forecast_disabled is True
     assert runtime.stats.disable_reason == "model-hook branch signature changed within one solver step"
@@ -443,7 +475,7 @@ def test_mixed_batch_layout_presence_disables_forecast() -> None:
     first_id = runtime.register_model_hook_call(run_id, 0, expected_shape=(1, 8, 4), branch_signature=None)
     runtime.observe_actual_feature(run_id, 0, torch.randn(1, 8, 4), call_id=first_id)
     second_id = runtime.register_model_hook_call(
-        run_id, 0, expected_shape=(1, 8, 4), branch_signature=(("cond_or_uncond", (1,)),)
+        run_id, 0, expected_shape=(1, 8, 4), branch_signature=(("cond_or_uncond", (1,)), ("uuids", ("u1",)))
     )
     runtime.observe_actual_feature(run_id, 0, torch.randn(1, 8, 4), call_id=second_id)
     runtime.finalize_solver_step(decision["run_id"], decision["solver_step_id"], used_forecast=False)
@@ -466,11 +498,11 @@ def test_split_forecast_failure_after_first_slice_still_counts_as_mixed_path() -
             total_steps,
         )
         first_id = runtime.register_model_hook_call(
-            run_id, step_id, expected_shape=(1, 8, 4), branch_signature=(("cond_or_uncond", (1,)),)
+            run_id, step_id, expected_shape=(1, 8, 4), branch_signature=(("cond_or_uncond", (1,)), ("uuids", ("u1",)))
         )
         runtime.observe_actual_feature(run_id, step_id, torch.ones(1, 8, 4), call_id=first_id)
         second_id = runtime.register_model_hook_call(
-            run_id, step_id, expected_shape=(1, 8, 4), branch_signature=(("cond_or_uncond", (0,)),)
+            run_id, step_id, expected_shape=(1, 8, 4), branch_signature=(("cond_or_uncond", (0,)), ("uuids", ("u0",)))
         )
         runtime.observe_actual_feature(run_id, step_id, torch.ones(1, 8, 4), call_id=second_id)
         runtime.finalize_solver_step(run_id, step_id, used_forecast=False)
@@ -482,7 +514,7 @@ def test_split_forecast_failure_after_first_slice_still_counts_as_mixed_path() -
         total_steps,
     )
     first_id = runtime.register_model_hook_call(
-        run_id, 5, expected_shape=(1, 8, 4), branch_signature=(("cond_or_uncond", (0,)),)
+        run_id, 5, expected_shape=(1, 8, 4), branch_signature=(("cond_or_uncond", (0,)), ("uuids", ("u0",)))
     )
     assert runtime.predict_feature(run_id, 5, expected_shape=(1, 8, 4), call_id=first_id) is not None
     second_id = runtime.register_model_hook_call(run_id, 5, expected_shape=(1, 8, 4), branch_signature=None)
@@ -619,6 +651,7 @@ def main() -> None:
     test_multiple_hook_calls_are_aggregated_on_actual_steps()
     test_split_forecast_step_uses_spectrum_across_subcalls()
     test_split_forecast_step_without_layout_labels_falls_back_to_actual()
+    test_chunk_level_cond_or_uncond_and_uuid_labels_expand_to_rows_for_split_forecast()
     test_duplicate_batch_labels_can_be_reordered_for_forecast()
     test_topology_change_disables_forecast()
     test_mixed_batch_layout_presence_disables_forecast()
