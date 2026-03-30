@@ -52,6 +52,7 @@ class _ActiveStep:
     predicted_full_feature: Optional[torch.Tensor] = None
     prediction_row_positions: Optional[dict[int, deque[int]]] = None
     prediction_next_row: int = 0
+    used_forecast_any: bool = False
 
 
 class SpectrumRuntime:
@@ -444,6 +445,7 @@ class SpectrumRuntime:
             step.call_predicted_features[resolved_call_id] = predicted_feature
 
         step.call_used_forecast[resolved_call_id] = True
+        step.used_forecast_any = True
         return step.call_predicted_features[resolved_call_id]
 
     def abort_solver_step(self, run_id: int, solver_step_id: int) -> None:
@@ -460,7 +462,7 @@ class SpectrumRuntime:
         requested_actual_forward = bool(step.decision["actual_forward"])
 
         observed_actual = any(step.call_observed_actual)
-        used_forecast_any = any(step.call_used_forecast)
+        used_forecast_any = step.used_forecast_any or any(step.call_used_forecast)
         if bool(used_forecast) and not observed_actual:
             used_forecast_any = True
         if step.decision["actual_forward"] and not observed_actual:
