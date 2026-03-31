@@ -561,7 +561,13 @@ class SpectrumRuntime:
                                     device=target_device,
                                     dtype=target_dtype if target_dtype is not None else combined_feature.dtype,
                                 )
-                            self.forecaster.update(step.time_coord, combined_feature)
+                            self.forecaster.update(
+                                step.time_coord,
+                                combined_feature,
+                                predict_device=step.actual_feature_device,
+                                output_device=step.actual_feature_device,
+                                output_dtype=step.actual_feature_dtype,
+                            )
                     except ValueError:
                         self._disable_forecasting("combined actual feature shape changed across solver steps")
             if (
