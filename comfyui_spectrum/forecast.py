@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import List, Optional, Sequence
 
 import torch
 
@@ -315,22 +315,55 @@ class ChebyshevSpectrumForecaster:
                 self._coeff_device = self._coeff.to(device=self._predict_device, dtype=self._predict_dtype)
         return self._coeff_device
 
-    def _linear_prediction(self, time_coord: float) -> torch.Tensor:
-        if self._latest_feature_flat_device is None or self._latest_time_coord is None:
+    @staticmethod
+    def _select_rows(tensor: torch.Tensor, rows: tuple[int, ...], *, dim: int) -> torch.Tensor:
+        if len(rows) == 0:
+            raise RuntimeError("Spectrum forecaster received an empty row selection.")
+        if len(rows) == tensor.shape[dim] and all(row == idx for idx, row in enumerate(rows)):
+            return tensor
+        start = rows[0]
+        if all(row == start + offset for offset, row in enumerate(rows)):
+            return tensor.narrow(dim, start, len(rows))
+        index = torch.tensor(rows, device=tensor.device, dtype=torch.long)
+        return tensor.index_select(dim, index)
+
+    def _normalize_prediction_rows(self, rows: Optional[Sequence[int]]) -> tuple[int, ...]:
+        if self._feature_shape is None:
             raise RuntimeError("Spectrum forecaster has no cached feature history.")
+        batch = int(self._feature_shape[0])
+        if rows is None:
+            return tuple(range(batch))
+        resolved = tuple(int(row) for row in rows)
+        if not resolved:
+            raise RuntimeError("Spectrum forecaster received an empty row selection.")
+        for row in resolved:
+            if row < 0 or row >= batch:
+                raise RuntimeError(
+                    f"Spectrum forecaster row selection {resolved} is outside the cached batch size {batch}."
+                )
+        return resolved
+
+    def _linear_prediction_rows(self, time_coord: float, rows: tuple[int, ...]) -> torch.Tensor:
+        if self._feature_shape is None or self._latest_feature_flat_device is None or self._latest_time_coord is None:
+            raise RuntimeError("Spectrum forecaster has no cached feature history.")
+        last = self._select_rows(self._latest_feature_flat_device.reshape(self._feature_shape), rows, dim=0)
         if self._previous_feature_flat_device is None or self._previous_time_coord is None:
-            return self._latest_feature_flat_device
+            return last
 
         delta_coord = self._latest_time_coord - self._previous_time_coord
         if abs(delta_coord) <= 1e-12:
-            return self._latest_feature_flat_device
+            return last
 
+        prev = self._select_rows(self._previous_feature_flat_device.reshape(self._feature_shape), rows, dim=0)
         k = (float(time_coord) - float(self._latest_time_coord)) / float(delta_coord)
-        last_f = self._latest_feature_flat_device
-        prev_f = self._previous_feature_flat_device
-        return last_f + k * (last_f - prev_f)
+        return last + k * (last - prev)
 
-    def predict(self, time_coord: float, blend_weight: float) -> torch.Tensor:
+    def predict_rows(
+        self,
+        time_coord: float,
+        rows: Optional[Sequence[int]],
+        blend_weight: float,
+    ) -> torch.Tensor:
         if (
             self._feature_shape is None
             or self._feature_dtype is None
@@ -344,16 +377,23 @@ class ChebyshevSpectrumForecaster:
             raise RuntimeError("Spectrum forecaster is not ready yet.")
 
         degree, _ = self._ensure_coeff()
+        resolved_rows = self._normalize_prediction_rows(rows)
+        subset_shape = (len(resolved_rows), *tuple(self._feature_shape[1:]))
         coeff_device = self._ensure_coeff_device()
 
         coord_star = torch.tensor([float(time_coord)], device=self._predict_device, dtype=torch.float32)
         design_star = self._build_design(coord_star, degree).to(dtype=coeff_device.dtype)
-        spectral = (design_star @ coeff_device).reshape(self._feature_shape)
+        coeff_view = coeff_device.reshape(coeff_device.shape[0], *tuple(self._feature_shape))
+        coeff_rows = self._select_rows(coeff_view, resolved_rows, dim=1)
+        spectral = (design_star @ coeff_rows.reshape(coeff_rows.shape[0], -1)).reshape(subset_shape)
 
         blend = float(blend_weight)
         if blend >= (1.0 - 1e-12):
             out = spectral
         else:
-            linear = self._linear_prediction(time_coord).reshape(self._feature_shape)
+            linear = self._linear_prediction_rows(time_coord, resolved_rows)
             out = blend * spectral + (1.0 - blend) * linear
         return out.to(device=self._output_device, dtype=self._feature_dtype)
+
+    def predict(self, time_coord: float, blend_weight: float) -> torch.Tensor:
+        return self.predict_rows(time_coord=time_coord, rows=None, blend_weight=blend_weight)
