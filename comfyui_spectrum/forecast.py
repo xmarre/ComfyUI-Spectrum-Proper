@@ -80,7 +80,7 @@ class ChebyshevSpectrumForecaster:
         predict_device: Optional[torch.device] = None,
         output_device: Optional[torch.device] = None,
         output_dtype: Optional[torch.dtype] = None,
-        blend_weight: float = 1.0,
+        blend_weight: Optional[float] = None,
     ) -> None:
         feat = feature.detach()
         if self._feature_shape is None:
@@ -109,7 +109,7 @@ class ChebyshevSpectrumForecaster:
         self._device = resolved_stats_device
         self._predict_dtype = resolved_predict_dtype
 
-        linear_mirrors_enabled = float(blend_weight) < (1.0 - 1e-12)
+        linear_mirrors_enabled = True if blend_weight is None else float(blend_weight) < (1.0 - 1e-12)
         predict_context_changed = (
             previous_predict_device != self._predict_device or previous_predict_dtype != self._predict_dtype
         )
@@ -233,6 +233,8 @@ class ChebyshevSpectrumForecaster:
             return
         if force_rebuild or self._latest_feature_flat_device is None:
             self._refresh_prediction_mirrors()
+            self._latest_feature_flat_device = self._mirror_feature_for_prediction(feat)
+            self._latest_time_coord = entry.time_coord
             return
 
         self._previous_feature_flat_device = self._latest_feature_flat_device
