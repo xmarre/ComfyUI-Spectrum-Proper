@@ -92,6 +92,29 @@ def _forecast_feature_sanitization_stats(feature: torch.Tensor, dtype: torch.dty
     }
 
 
+def _debug_log_flux_forecast_context(
+    runtime: SpectrumRuntime,
+    *,
+    stage: str,
+    run_id: int,
+    solver_step_id: int,
+    expected_feature_shape: Tuple[int, ...],
+    post_input_patches_len: int,
+    timestep_zero_index: Optional[Sequence[Tuple[int, int]]],
+) -> None:
+    if not runtime.cfg.debug:
+        return
+    LOG.warning(
+        "Spectrum flux forecast context run_id=%s step=%s stage=%s expected_shape=%s post_input_patches=%s timestep_zero_index=%s",
+        run_id,
+        solver_step_id,
+        stage,
+        expected_feature_shape,
+        post_input_patches_len,
+        timestep_zero_index is not None,
+    )
+
+
 def _build_branch_signature(transformer_options: Dict[str, Any]) -> Optional[tuple[Any, ...]]:
     signature = []
     cond_or_uncond = transformer_options.get("cond_or_uncond")
@@ -383,6 +406,15 @@ def _run_flux_forward_with_spectrum(
     if step_ctx is not None and hidden_dim is not None and not post_input_patches:
         _, run_id, solver_step_id, actual_forward = step_ctx
         expected_feature_shape = (raw_img.shape[0], raw_img.shape[1], hidden_dim)
+        _debug_log_flux_forecast_context(
+            runtime,
+            stage="pre_img_in",
+            run_id=run_id,
+            solver_step_id=solver_step_id,
+            expected_feature_shape=expected_feature_shape,
+            post_input_patches_len=len(post_input_patches),
+            timestep_zero_index=timestep_zero_index,
+        )
         vec_orig = vec
         txt_vec = vec
         modulation_dims = None
@@ -471,6 +503,15 @@ def _run_flux_forward_with_spectrum(
 
     if step_ctx is not None and call_id is None:
         _, run_id, solver_step_id, actual_forward = step_ctx
+        _debug_log_flux_forecast_context(
+            runtime,
+            stage="post_img_in",
+            run_id=run_id,
+            solver_step_id=solver_step_id,
+            expected_feature_shape=expected_feature_shape,
+            post_input_patches_len=len(post_input_patches),
+            timestep_zero_index=timestep_zero_index,
+        )
         call_id = runtime.register_model_hook_call(
             run_id,
             solver_step_id,
