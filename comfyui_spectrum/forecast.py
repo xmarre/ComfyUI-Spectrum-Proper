@@ -71,7 +71,15 @@ class ChebyshevSpectrumForecaster:
         needed = max(2, int(min_points) if min_points is not None else self.degree + 1)
         return len(self._history) >= needed
 
-    def update(self, time_coord: float, feature: torch.Tensor) -> None:
+    def update(
+        self,
+        time_coord: float,
+        feature: torch.Tensor,
+        *,
+        predict_device: Optional[torch.device] = None,
+        output_device: Optional[torch.device] = None,
+        output_dtype: Optional[torch.dtype] = None,
+    ) -> None:
         feat = feature.detach()
         if self._feature_shape is None:
             self._feature_shape = feat.shape
@@ -80,9 +88,17 @@ class ChebyshevSpectrumForecaster:
             raise ValueError(
                 f"Spectrum feature shape changed from {tuple(self._feature_shape)} to {tuple(feat.shape)}."
             )
-        self._feature_dtype = feat.dtype
-        self._predict_device = feat.device
-        self._output_device = feat.device
+        self._feature_dtype = output_dtype if output_dtype is not None else feat.dtype
+        if predict_device is not None:
+            self._predict_device = predict_device
+        else:
+            self._predict_device = feat.device
+        if output_device is not None:
+            self._output_device = output_device
+        else:
+            self._output_device = feat.device
+        if self._predict_device is None:
+            self._predict_device = self._output_device
 
         feature_flat = feat.reshape(-1).to(device="cpu", dtype=torch.float32, copy=True)
         basis_row = self._build_design(
