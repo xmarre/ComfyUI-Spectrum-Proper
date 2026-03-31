@@ -388,12 +388,6 @@ def _run_flux_forward_with_spectrum(
     # Spectrum forecasts the final image-token feature right before final_layer.
     expected_feature_shape = (img.shape[0], img.shape[1], *img.shape[2:])
 
-    if img_ids is not None:
-        ids = torch.cat((txt_ids, img_ids), dim=1)
-        pe = inner.pe_embedder(ids)
-    else:
-        pe = None
-
     vec_orig = vec
     txt_vec = vec
     extra_kwargs = {}
@@ -445,6 +439,12 @@ def _run_flux_forward_with_spectrum(
                     final_kwargs["modulation_dims"] = modulation_dims
                 pred_feature = _sanitize_forecast_feature_for_final_layer(pred_feature, img.dtype)
                 return inner.final_layer(pred_feature, vec_orig, **final_kwargs)
+
+    if img_ids is not None:
+        ids = torch.cat((txt_ids, img_ids), dim=1)
+        pe = inner.pe_embedder(ids)
+    else:
+        pe = None
 
     if inner.params.global_modulation:
         vec = (inner.double_stream_modulation_img(vec_orig), inner.double_stream_modulation_txt(txt_vec))
