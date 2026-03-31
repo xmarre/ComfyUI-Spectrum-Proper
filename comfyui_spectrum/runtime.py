@@ -403,13 +403,18 @@ class SpectrumRuntime:
             return None
         if step.prediction_row_positions is None:
             step.prediction_row_positions = self._build_label_positions(self._history_batch_labels)
+        trial_positions = {
+            label: deque(position_list)
+            for label, position_list in step.prediction_row_positions.items()
+        }
 
         order = []
         for label in target_batch_labels:
-            positions = step.prediction_row_positions.get(label)
+            positions = trial_positions.get(label)
             if not positions:
                 return None
             order.append(positions.popleft())
+        step.prediction_row_positions = trial_positions
         prediction_rows = tuple(order)
         step.call_prediction_rows[resolved_call_id] = prediction_rows
         return prediction_rows
