@@ -36,6 +36,34 @@ def make_runtime(**overrides) -> SpectrumRuntime:
     return SpectrumRuntime(cfg)
 
 
+def test_forecaster_recomputes_coeff_on_update_not_predict() -> None:
+    class CountingForecaster(ChebyshevSpectrumForecaster):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.solve_calls = 0
+
+        def _solve(self, design: torch.Tensor, features: torch.Tensor) -> torch.Tensor:
+            self.solve_calls += 1
+            return super()._solve(design, features)
+
+    forecaster = CountingForecaster(degree=4, ridge_lambda=0.1, max_history=8)
+    for idx in range(5):
+        forecaster.update(float(idx), torch.randn(1, 8, 4))
+
+    assert forecaster._history[0].feature_flat.device.type == "cpu"
+
+    solve_calls_before_predict = forecaster.solve_calls
+    first = forecaster.predict(5.0, blend_weight=0.5)
+    second = forecaster.predict(5.5, blend_weight=0.5)
+    assert first.shape == (1, 8, 4)
+    assert second.shape == (1, 8, 4)
+    assert forecaster.solve_calls == solve_calls_before_predict
+
+    solve_calls_before_update = forecaster.solve_calls
+    forecaster.update(6.0, torch.randn(1, 8, 4))
+    assert forecaster.solve_calls == solve_calls_before_update + 1
+
+
 def test_solver_step_scheduler() -> None:
     runtime = make_runtime()
     sample_sigmas = torch.linspace(1.0, 0.0, 51)
@@ -642,6 +670,7 @@ def test_forecast_feature_sanitization_stats_only_report_real_violations() -> No
 
 
 def main() -> None:
+    test_forecaster_recomputes_coeff_on_update_not_predict()
     test_solver_step_scheduler()
     test_forecast_fallback_reconciles_bookkeeping()
     test_observe_actual_feature_clears_forecast_latch()

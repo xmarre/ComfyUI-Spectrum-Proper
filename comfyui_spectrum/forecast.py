@@ -46,6 +46,7 @@ class ChebyshevSpectrumForecaster:
         self._coeff = None
         self._cached_degree = None
         self._cache_dirty = True
+        self._recompute_coeff()
 
     @property
     def feature_shape(self) -> Optional[torch.Size]:
@@ -74,6 +75,7 @@ class ChebyshevSpectrumForecaster:
         self._coeff = None
         self._cached_degree = None
         self._cache_dirty = True
+        self._recompute_coeff()
 
     def _build_design(self, coords: torch.Tensor, degree: int) -> torch.Tensor:
         coords = coords.reshape(-1, 1).to(torch.float32)
@@ -98,18 +100,30 @@ class ChebyshevSpectrumForecaster:
             chol = torch.linalg.cholesky(lhs + jitter * torch.eye(p, device=lhs.device, dtype=lhs.dtype))
         return torch.cholesky_solve(rhs, chol)
 
-    def _ensure_coeff(self) -> tuple[int, torch.Tensor]:
-        degree = min(self.degree, len(self._history) - 1)
-        if not self._cache_dirty and self._coeff is not None and self._cached_degree == degree:
-            return degree, self._coeff
+    def _recompute_coeff(self) -> None:
+        if not self.ready():
+            self._coeff = None
+            self._cached_degree = None
+            self._cache_dirty = True
+            return
 
+        degree = min(self.degree, len(self._history) - 1)
         coords = torch.tensor([entry.time_coord for entry in self._history], device="cpu", dtype=torch.float32)
         features = torch.stack([entry.feature_flat for entry in self._history], dim=0)
         design = self._build_design(coords, degree)
         self._coeff = self._solve(design, features)
         self._cached_degree = degree
         self._cache_dirty = False
-        return degree, self._coeff
+
+    def _ensure_coeff(self) -> tuple[int, torch.Tensor]:
+        degree = min(self.degree, len(self._history) - 1)
+        if not self._cache_dirty and self._coeff is not None and self._cached_degree == degree:
+            return degree, self._coeff
+
+        self._recompute_coeff()
+        if self._coeff is None or self._cached_degree is None:
+            raise RuntimeError("Spectrum forecaster coefficients are not ready yet.")
+        return self._cached_degree, self._coeff
 
     def _linear_prediction(self, time_coord: float) -> torch.Tensor:
         last = self._history[-1]
