@@ -40,11 +40,11 @@ def test_forecaster_recomputes_coeff_on_update_not_predict() -> None:
     class CountingForecaster(ChebyshevSpectrumForecaster):
         def __init__(self, *args, **kwargs):
             super().__init__(*args, **kwargs)
-            self.solve_calls = 0
+            self.recompute_calls = 0
 
-        def _solve(self, design: torch.Tensor, features: torch.Tensor) -> torch.Tensor:
-            self.solve_calls += 1
-            return super()._solve(design, features)
+        def _recompute_coeff(self) -> None:
+            self.recompute_calls += 1
+            return super()._recompute_coeff()
 
     forecaster = CountingForecaster(degree=4, ridge_lambda=0.1, max_history=8)
     for idx in range(5):
@@ -52,16 +52,16 @@ def test_forecaster_recomputes_coeff_on_update_not_predict() -> None:
 
     assert forecaster._history[0].feature_flat.device.type == "cpu"
 
-    solve_calls_before_predict = forecaster.solve_calls
+    recompute_calls_before_predict = forecaster.recompute_calls
     first = forecaster.predict(5.0, blend_weight=0.5)
     second = forecaster.predict(5.5, blend_weight=0.5)
     assert first.shape == (1, 8, 4)
     assert second.shape == (1, 8, 4)
-    assert forecaster.solve_calls == solve_calls_before_predict
+    assert forecaster.recompute_calls == recompute_calls_before_predict
 
-    solve_calls_before_update = forecaster.solve_calls
+    recompute_calls_before_update = forecaster.recompute_calls
     forecaster.update(6.0, torch.randn(1, 8, 4))
-    assert forecaster.solve_calls == solve_calls_before_update + 1
+    assert forecaster.recompute_calls == recompute_calls_before_update + 1
 
 
 def test_solver_step_scheduler() -> None:
