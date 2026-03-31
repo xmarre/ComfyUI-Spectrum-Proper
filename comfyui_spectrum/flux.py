@@ -123,6 +123,17 @@ def _extract_step_context(transformer_options: Dict[str, Any]) -> Optional[tuple
     return runtime, int(run_id), int(solver_step_id), bool(actual_forward)
 
 
+def _infer_flux_hidden_dim(inner: Any) -> Optional[int]:
+    img_in = getattr(inner, "img_in", None)
+    out_features = getattr(img_in, "out_features", None)
+    if isinstance(out_features, int) and out_features > 0:
+        return int(out_features)
+    weight = getattr(img_in, "weight", None)
+    if isinstance(weight, torch.Tensor) and weight.ndim >= 2 and weight.shape[0] > 0:
+        return int(weight.shape[0])
+    return None
+
+
 def _runtime_from_model_options(model_options: Dict[str, Any]) -> Optional[SpectrumRuntime]:
     transformer_options = (model_options or {}).get("transformer_options") or {}
     runtime = transformer_options.get("spectrum_runtime")
@@ -346,6 +357,7 @@ def _run_flux_forward_with_spectrum(
     transformer_options = (transformer_options or {}).copy()
     patches = transformer_options.get("patches", {})
     patches_replace = transformer_options.get("patches_replace", {})
+    post_input_patches = patches.get("post_input") or ()
     step_ctx = _extract_step_context(transformer_options)
     actual_forward = True
     run_id: Optional[int] = None
@@ -354,23 +366,76 @@ def _run_flux_forward_with_spectrum(
     if img.ndim != 3 or txt.ndim != 3:
         raise ValueError("Input img and txt tensors must have 3 dimensions.")
 
-    img = inner.img_in(img)
-    vec = inner.time_in(timestep_embedding(timesteps, 256).to(img.dtype))
+    raw_img = img
+    raw_img_dtype = raw_img.dtype
+    hidden_dim = _infer_flux_hidden_dim(inner)
+    vec = inner.time_in(timestep_embedding(timesteps, 256).to(raw_img_dtype))
 
     if inner.params.guidance_embed and guidance is not None:
-        vec = vec + inner.guidance_in(timestep_embedding(guidance, 256).to(img.dtype))
+        vec = vec + inner.guidance_in(timestep_embedding(guidance, 256).to(raw_img_dtype))
 
     if inner.vector_in is not None:
         if y is None:
-            y = torch.zeros((img.shape[0], inner.params.vec_in_dim), device=img.device, dtype=img.dtype)
+            y = torch.zeros((raw_img.shape[0], inner.params.vec_in_dim), device=raw_img.device, dtype=raw_img_dtype)
         vec = vec + inner.vector_in(y[:, : inner.params.vec_in_dim])
+
+    call_id: Optional[int] = None
+    if step_ctx is not None and hidden_dim is not None and not post_input_patches:
+        _, run_id, solver_step_id, actual_forward = step_ctx
+        expected_feature_shape = (raw_img.shape[0], raw_img.shape[1], hidden_dim)
+        vec_orig = vec
+        txt_vec = vec
+        modulation_dims = None
+        if timestep_zero_index is not None:
+            modulation_dims = []
+            batch = vec.shape[0] // 2
+            vec_orig = vec_orig.reshape(2, batch, vec.shape[1]).movedim(0, 1)
+            for start, end in _invert_slices(timestep_zero_index, raw_img.shape[1]):
+                modulation_dims.append((start, end, 0))
+            for start, end in timestep_zero_index:
+                modulation_dims.append((start, end, 1))
+            txt_vec = vec[:batch]
+        call_id = runtime.register_model_hook_call(
+            run_id,
+            solver_step_id,
+            expected_shape=expected_feature_shape,
+            branch_signature=_build_branch_signature(transformer_options),
+        )
+        if not actual_forward:
+            pred_feature = runtime.predict_feature(
+                run_id,
+                solver_step_id,
+                expected_shape=expected_feature_shape,
+                call_id=call_id,
+            )
+            if pred_feature is not None:
+                if runtime.cfg.debug:
+                    sanitize_stats = _forecast_feature_sanitization_stats(pred_feature, raw_img_dtype)
+                    if sanitize_stats is not None:
+                        LOG.warning(
+                            "Spectrum sanitized forecast run_id=%s step=%s target_dtype=%s had_nonfinite=%s out_of_range=%s before_min=%s before_max=%s",
+                            run_id,
+                            solver_step_id,
+                            sanitize_stats["target_dtype"],
+                            sanitize_stats["had_nonfinite"],
+                            sanitize_stats["out_of_range"],
+                            sanitize_stats["before_min"],
+                            sanitize_stats["before_max"],
+                        )
+                final_kwargs = {}
+                if modulation_dims is not None:
+                    final_kwargs["modulation_dims"] = modulation_dims
+                pred_feature = _sanitize_forecast_feature_for_final_layer(pred_feature, raw_img_dtype)
+                return inner.final_layer(pred_feature, vec_orig, **final_kwargs)
+
+    img = inner.img_in(raw_img)
 
     if inner.txt_norm is not None:
         txt = inner.txt_norm(txt)
     txt = inner.txt_in(txt)
 
-    if "post_input" in patches:
-        for patch in patches["post_input"]:
+    if post_input_patches:
+        for patch in post_input_patches:
             out = patch(
                 {
                     "img": img,
@@ -404,8 +469,7 @@ def _run_flux_forward_with_spectrum(
         extra_kwargs["modulation_dims_img"] = modulation_dims
         txt_vec = vec[:batch]
 
-    call_id: Optional[int] = None
-    if step_ctx is not None:
+    if step_ctx is not None and call_id is None:
         _, run_id, solver_step_id, actual_forward = step_ctx
         call_id = runtime.register_model_hook_call(
             run_id,
