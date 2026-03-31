@@ -9,7 +9,7 @@ import torch
 @dataclass(slots=True)
 class _HistoryEntry:
     time_coord: float
-    feature: torch.Tensor
+    feature_flat: torch.Tensor
 
 
 class ChebyshevSpectrumForecaster:
@@ -32,11 +32,20 @@ class ChebyshevSpectrumForecaster:
         self._feature_shape: Optional[torch.Size] = None
         self._feature_dtype: Optional[torch.dtype] = None
         self._device: Optional[torch.device] = None
+        self._output_device: Optional[torch.device] = None
+        self._coeff: Optional[torch.Tensor] = None
+        self._cached_degree: Optional[int] = None
+        self._cache_dirty = True
 
     def configure(self, degree: int, ridge_lambda: float, max_history: int) -> None:
         self.degree = int(degree)
         self.ridge_lambda = float(ridge_lambda)
         self.max_history = int(max_history)
+        if len(self._history) > self.max_history:
+            self._history = self._history[-self.max_history :]
+        self._coeff = None
+        self._cached_degree = None
+        self._cache_dirty = True
 
     @property
     def feature_shape(self) -> Optional[torch.Size]:
@@ -51,15 +60,20 @@ class ChebyshevSpectrumForecaster:
         if self._feature_shape is None:
             self._feature_shape = feat.shape
             self._feature_dtype = feat.dtype
-            self._device = feat.device
+            self._device = torch.device("cpu")
+            self._output_device = feat.device
         elif feat.shape != self._feature_shape:
             raise ValueError(
                 f"Spectrum feature shape changed from {tuple(self._feature_shape)} to {tuple(feat.shape)}."
             )
 
-        self._history.append(_HistoryEntry(float(time_coord), feat))
+        feature_flat = feat.reshape(-1).to(device="cpu", dtype=torch.float32, copy=True)
+        self._history.append(_HistoryEntry(float(time_coord), feature_flat))
         if len(self._history) > self.max_history:
             self._history.pop(0)
+        self._coeff = None
+        self._cached_degree = None
+        self._cache_dirty = True
 
     def _build_design(self, coords: torch.Tensor, degree: int) -> torch.Tensor:
         coords = coords.reshape(-1, 1).to(torch.float32)
@@ -84,36 +98,46 @@ class ChebyshevSpectrumForecaster:
             chol = torch.linalg.cholesky(lhs + jitter * torch.eye(p, device=lhs.device, dtype=lhs.dtype))
         return torch.cholesky_solve(rhs, chol)
 
+    def _ensure_coeff(self) -> tuple[int, torch.Tensor]:
+        degree = min(self.degree, len(self._history) - 1)
+        if not self._cache_dirty and self._coeff is not None and self._cached_degree == degree:
+            return degree, self._coeff
+
+        coords = torch.tensor([entry.time_coord for entry in self._history], device="cpu", dtype=torch.float32)
+        features = torch.stack([entry.feature_flat for entry in self._history], dim=0)
+        design = self._build_design(coords, degree)
+        self._coeff = self._solve(design, features)
+        self._cached_degree = degree
+        self._cache_dirty = False
+        return degree, self._coeff
+
     def _linear_prediction(self, time_coord: float) -> torch.Tensor:
         last = self._history[-1]
         if len(self._history) < 2:
-            return last.feature.to(torch.float32)
+            return last.feature_flat
 
         prev = self._history[-2]
         delta_coord = last.time_coord - prev.time_coord
         if abs(delta_coord) <= 1e-12:
-            return last.feature.to(torch.float32)
+            return last.feature_flat
 
         k = (float(time_coord) - float(last.time_coord)) / float(delta_coord)
-        last_f = last.feature.to(torch.float32)
-        prev_f = prev.feature.to(torch.float32)
+        last_f = last.feature_flat
+        prev_f = prev.feature_flat
         return last_f + k * (last_f - prev_f)
 
     def predict(self, time_coord: float, blend_weight: float) -> torch.Tensor:
-        if self._feature_shape is None or self._feature_dtype is None or self._device is None:
+        if (
+            self._feature_shape is None
+            or self._feature_dtype is None
+            or self._device is None
+            or self._output_device is None
+        ):
             raise RuntimeError("Spectrum forecaster has no cached feature history.")
         if not self.ready():
             raise RuntimeError("Spectrum forecaster is not ready yet.")
 
-        degree = min(self.degree, len(self._history) - 1)
-        coords = torch.tensor([entry.time_coord for entry in self._history], device=self._device, dtype=torch.float32)
-        features = torch.stack(
-            [entry.feature.reshape(-1).to(torch.float32) for entry in self._history],
-            dim=0,
-        )
-
-        design = self._build_design(coords, degree)
-        coeff = self._solve(design, features)
+        degree, coeff = self._ensure_coeff()
 
         coord_star = torch.tensor([float(time_coord)], device=self._device, dtype=torch.float32)
         design_star = self._build_design(coord_star, degree)
@@ -121,4 +145,4 @@ class ChebyshevSpectrumForecaster:
 
         linear = self._linear_prediction(time_coord).reshape(self._feature_shape)
         out = float(blend_weight) * spectral + (1.0 - float(blend_weight)) * linear
-        return out.to(dtype=self._feature_dtype)
+        return out.to(device=self._output_device, dtype=self._feature_dtype)
