@@ -91,11 +91,11 @@ class ChebyshevSpectrumForecaster:
         self._feature_dtype = output_dtype if output_dtype is not None else feat.dtype
         if predict_device is not None:
             self._predict_device = predict_device
-        elif self._predict_device is None:
+        else:
             self._predict_device = feat.device
         if output_device is not None:
             self._output_device = output_device
-        elif self._output_device is None:
+        else:
             self._output_device = feat.device
         if self._predict_device is None:
             self._predict_device = self._output_device
