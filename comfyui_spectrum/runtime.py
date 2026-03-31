@@ -567,6 +567,7 @@ class SpectrumRuntime:
                                 predict_device=step.actual_feature_device,
                                 output_device=step.actual_feature_device,
                                 output_dtype=step.actual_feature_dtype,
+                                blend_weight=self.cfg.blend_weight,
                             )
                     except ValueError:
                         self._disable_forecasting("combined actual feature shape changed across solver steps")
