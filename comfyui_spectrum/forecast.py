@@ -44,7 +44,11 @@ class ChebyshevSpectrumForecaster:
         self.degree = int(degree)
         self.ridge_lambda = float(ridge_lambda)
         self.max_history = int(max_history)
-        if len(self._history) > self.max_history:
+        if self.max_history < 0:
+            raise ValueError("max_history must be non-negative.")
+        if self.max_history == 0:
+            self._history = []
+        elif len(self._history) > self.max_history:
             self._history = self._history[-self.max_history :]
         self._coeff = None
         self._cached_degree = None
