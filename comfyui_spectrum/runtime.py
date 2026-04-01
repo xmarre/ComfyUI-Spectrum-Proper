@@ -203,7 +203,7 @@ class SpectrumRuntime:
         if self._active_run is None or self._active_run.run_id != int(run_id):
             return
         self._active_run = None
-        self._active_steps = {}
+        self._reset_scheduler_state()
 
     def begin_solver_step(self, run_id: int, solver_step_id: int, time_coord: float, total_steps: int) -> Dict[str, Any]:
         if self._active_run is None or self._active_run.run_id != int(run_id):
