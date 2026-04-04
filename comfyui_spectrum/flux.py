@@ -9,7 +9,7 @@ from .config import SpectrumConfig
 from .runtime import SpectrumRuntime
 
 LOG = logging.getLogger(__name__)
-_SUPPORTED_SINGLE_EVAL_SAMPLERS = frozenset({"sample_euler"})
+_SUPPORTED_SINGLE_EVAL_SAMPLERS = frozenset({"sample_euler", "sample_euler_flow", "euler_flow"})
 
 
 def _clone_model(model: Any) -> Any:
@@ -54,6 +54,10 @@ def _invert_slices(slices: Sequence[Tuple[int, int]], length: int):
 def _sampler_name(sampler: Any) -> str:
     fn = getattr(sampler, "sampler_function", None)
     return getattr(fn, "__name__", type(sampler).__name__)
+
+
+def _supports_solver_step_tracking(sampler: Any) -> bool:
+    return _sampler_name(sampler) in _SUPPORTED_SINGLE_EVAL_SAMPLERS
 
 
 def _sanitize_forecast_feature_for_final_layer(feature: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
@@ -218,7 +222,7 @@ def _install_sampler_level_wrappers(model: Any, runtime: SpectrumRuntime) -> Non
                 latent_shapes=latent_shapes,
             )
         sampler_name = _sampler_name(sampler)
-        supports_solver_steps = sampler_name in _SUPPORTED_SINGLE_EVAL_SAMPLERS
+        supports_solver_steps = _supports_solver_step_tracking(sampler)
         run_id = wrapper_runtime.start_run(sigmas, sampler_name, supports_solver_steps=supports_solver_steps)
         try:
             return executor(
