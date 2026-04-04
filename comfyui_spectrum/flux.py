@@ -9,7 +9,17 @@ from .config import SpectrumConfig
 from .runtime import SpectrumRuntime
 
 LOG = logging.getLogger(__name__)
-_SUPPORTED_SINGLE_EVAL_SAMPLERS = frozenset({"sample_euler", "sample_euler_flow", "euler_flow"})
+_SUPPORTED_SINGLE_EVAL_SAMPLERS = frozenset(
+    {
+        "sample_euler",
+        "sample_euler_ancestral",
+        "sample_euler_flow",
+        "sample_lcm",
+        "sample_dpmpp_2m_sde",
+        "sample_dpmpp_3m_sde",
+        "euler_flow",
+    }
+)
 
 
 def _clone_model(model: Any) -> Any:
