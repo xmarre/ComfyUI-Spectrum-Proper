@@ -18,6 +18,7 @@ _SUPPORTED_SINGLE_EVAL_SAMPLERS = frozenset(
         "sample_dpmpp_2m_sde",
         "sample_dpmpp_3m_sde",
         "euler_flow",
+        "Flux2JiTSamplerImpl",
     }
 )
 

@@ -45,6 +45,7 @@ def test_supported_single_eval_sampler_names_include_supported_variants() -> Non
     assert "sample_dpmpp_2m_sde" in _SUPPORTED_SINGLE_EVAL_SAMPLERS
     assert "sample_dpmpp_3m_sde" in _SUPPORTED_SINGLE_EVAL_SAMPLERS
     assert "euler_flow" in _SUPPORTED_SINGLE_EVAL_SAMPLERS
+    assert "Flux2JiTSamplerImpl" in _SUPPORTED_SINGLE_EVAL_SAMPLERS
 
     class _FunctionSampler:
         def __init__(self, fn):
@@ -66,6 +67,7 @@ def test_supported_single_eval_sampler_names_include_supported_variants() -> Non
         raise NotImplementedError
 
     EulerFlowSampler = type("euler_flow", (), {})
+    Flux2JiTSamplerImpl = type("Flux2JiTSamplerImpl", (), {})
 
     assert _supports_solver_step_tracking(_FunctionSampler(sample_euler_ancestral)) is True
     assert _supports_solver_step_tracking(_FunctionSampler(sample_euler_flow)) is True
@@ -73,6 +75,7 @@ def test_supported_single_eval_sampler_names_include_supported_variants() -> Non
     assert _supports_solver_step_tracking(_FunctionSampler(sample_dpmpp_2m_sde)) is True
     assert _supports_solver_step_tracking(_FunctionSampler(sample_dpmpp_3m_sde)) is True
     assert _supports_solver_step_tracking(EulerFlowSampler()) is True
+    assert _supports_solver_step_tracking(Flux2JiTSamplerImpl()) is True
 
 
 def test_forecaster_recomputes_coeff_on_update_not_predict() -> None:
@@ -642,6 +645,7 @@ def test_flux_sampler_contract_allows_supported_single_eval_variants() -> None:
             "sample_dpmpp_2m_sde",
             "sample_dpmpp_3m_sde",
             "euler_flow",
+            "Flux2JiTSamplerImpl",
         }
     )
 
