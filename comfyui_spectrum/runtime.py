@@ -357,7 +357,7 @@ class SpectrumRuntime:
             step.actual_feature_device = feature.device
         if step.actual_feature_dtype is None:
             step.actual_feature_dtype = feature.dtype
-        step.call_actual_features[resolved_call_id] = feature.detach().to(device="cpu", copy=True)
+        step.call_actual_features[resolved_call_id] = feature.detach().clone()
 
     @staticmethod
     def _reorder_feature_to_labels(

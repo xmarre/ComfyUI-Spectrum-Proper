@@ -17,7 +17,7 @@ class SpectrumApplyFlux:
                 "flex_window": ("FLOAT", {"default": 0.75, "min": 0.0, "max": 8.0, "step": 0.05}),
                 "warmup_steps": ("INT", {"default": 5, "min": 0, "max": 32, "step": 1}),
                 "tail_actual_steps": ("INT", {"default": 3, "min": 0, "max": 32, "step": 1}),
-                "max_history": ("INT", {"default": 128, "min": 8, "max": 512, "step": 1}),
+                "max_history": ("INT", {"default": 32, "min": 8, "max": 512, "step": 1}),
                 "debug": ("BOOLEAN", {"default": False}),
             }
         }

@@ -21,7 +21,7 @@ class ChebyshevSpectrumForecaster:
     instead of wrapping the whole sampler output.
     """
 
-    def __init__(self, degree: int = 4, ridge_lambda: float = 0.1, max_history: int = 128):
+    def __init__(self, degree: int = 4, ridge_lambda: float = 0.1, max_history: int = 32):
         self.degree = int(degree)
         self.ridge_lambda = float(ridge_lambda)
         self.max_history = int(max_history)
@@ -36,7 +36,6 @@ class ChebyshevSpectrumForecaster:
         self._predict_dtype: Optional[torch.dtype] = None
         self._output_device: Optional[torch.device] = None
         self._coeff: Optional[torch.Tensor] = None
-        self._coeff_device: Optional[torch.Tensor] = None
         self._cached_degree: Optional[int] = None
         self._cache_dirty = True
         self._gram: Optional[torch.Tensor] = None
@@ -115,7 +114,6 @@ class ChebyshevSpectrumForecaster:
         )
         if previous_stats_device != self._device:
             self._coeff = None
-            self._coeff_device = None
             self._cached_degree = None
             self._cache_dirty = True
             self._rebuild_stats()
@@ -135,7 +133,6 @@ class ChebyshevSpectrumForecaster:
             force_rebuild=predict_context_changed or linear_mirrors_enabled != self._linear_mirrors_enabled,
         )
         self._coeff = None
-        self._coeff_device = None
         self._cached_degree = None
         self._cache_dirty = True
         self._recompute_coeff()
@@ -198,7 +195,6 @@ class ChebyshevSpectrumForecaster:
         self._previous_time_coord = None
         self._latest_feature_flat_device = None
         self._latest_time_coord = None
-        self._coeff_device = None
         if (
             self._predict_device is None
             or self._predict_dtype is None
@@ -268,7 +264,6 @@ class ChebyshevSpectrumForecaster:
     def _recompute_coeff(self) -> None:
         if not self.ready() or self._gram is None or self._rhs is None:
             self._coeff = None
-            self._coeff_device = None
             self._cached_degree = None
             self._cache_dirty = True
             return
@@ -278,7 +273,6 @@ class ChebyshevSpectrumForecaster:
         rhs = self._rhs
         if lhs.numel() == 0 or rhs.numel() == 0:
             self._coeff = None
-            self._coeff_device = None
             self._cached_degree = None
             self._cache_dirty = True
             return
@@ -291,7 +285,6 @@ class ChebyshevSpectrumForecaster:
             jitter = max(float(diag_mean.item()) * 1e-6, 1e-8)
             chol = torch.linalg.cholesky(lhs + jitter * torch.eye(degree + 1, device=lhs.device, dtype=lhs.dtype))
         self._coeff = torch.cholesky_solve(rhs, chol)
-        self._coeff_device = None
         self._cached_degree = degree
         self._cache_dirty = False
 
@@ -305,15 +298,12 @@ class ChebyshevSpectrumForecaster:
             raise RuntimeError("Spectrum forecaster coefficients are not ready yet.")
         return self._cached_degree, self._coeff
 
-    def _ensure_coeff_device(self) -> torch.Tensor:
-        if self._coeff is None or self._predict_device is None or self._predict_dtype is None:
+    def _coeff_for_prediction(self) -> torch.Tensor:
+        if self._coeff is None or self._predict_device is None:
             raise RuntimeError("Spectrum forecaster prediction coefficients are not ready yet.")
-        if self._coeff_device is None:
-            if self._coeff.device == self._predict_device and self._coeff.dtype == self._predict_dtype:
-                self._coeff_device = self._coeff
-            else:
-                self._coeff_device = self._coeff.to(device=self._predict_device, dtype=self._predict_dtype)
-        return self._coeff_device
+        if self._coeff.device == self._predict_device and self._coeff.dtype == torch.float32:
+            return self._coeff
+        return self._coeff.to(device=self._predict_device, dtype=torch.float32)
 
     @staticmethod
     def _select_rows(tensor: torch.Tensor, rows: tuple[int, ...], *, dim: int) -> torch.Tensor:
@@ -379,10 +369,10 @@ class ChebyshevSpectrumForecaster:
         degree, _ = self._ensure_coeff()
         resolved_rows = self._normalize_prediction_rows(rows)
         subset_shape = (len(resolved_rows), *tuple(self._feature_shape[1:]))
-        coeff_device = self._ensure_coeff_device()
+        coeff_device = self._coeff_for_prediction()
 
         coord_star = torch.tensor([float(time_coord)], device=self._predict_device, dtype=torch.float32)
-        design_star = self._build_design(coord_star, degree).to(dtype=coeff_device.dtype)
+        design_star = self._build_design(coord_star, degree)
         coeff_view = coeff_device.reshape(coeff_device.shape[0], *tuple(self._feature_shape))
         coeff_rows = self._select_rows(coeff_view, resolved_rows, dim=1)
         spectral = (design_star @ coeff_rows.reshape(coeff_rows.shape[0], -1)).reshape(subset_shape)

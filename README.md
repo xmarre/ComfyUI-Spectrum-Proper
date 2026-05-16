@@ -140,7 +140,7 @@ This protects the refinement tail where late-step forecast bias tends to show up
 
 Cap for cached real-forward feature points used for the fit.
 
-This is an implementation guard, not a paper hyperparameter. With standard FLUX schedules it is usually far above the number of actual cached points anyway.
+This is an implementation guard, not a paper hyperparameter. The default is `32`, which is still above the expected number of actual cached points for common 50-step runs while avoiding a hidden large-history footprint.
 
 ### `debug`
 
@@ -157,6 +157,8 @@ Enables lightweight logging during patch install and a per-run summary of actual
 - `flex_window = 0.75`
 - `warmup_steps = 5`
 - `tail_actual_steps = 3`
+
+This is intentionally a little more conservative than the paper-style 14-NFE benchmark configuration because the final three solver steps stay actual-only by default. Set `tail_actual_steps = 0` when comparing raw NFE against paper-style settings.
 
 ### More aggressive
 
@@ -196,7 +198,7 @@ This repo normalizes the Chebyshev basis against the detected schedule length fr
 ## Known limitations
 
 - This repo currently targets **native ComfyUI FLUX only**.
-- Forecasting is only enabled for deterministic `sample_euler`; samplers that do not preserve a one-`predict_noise`-per-solver-step contract are treated as unsupported.
+- Forecasting is enabled only for sampler paths that are allowlisted as preserving a one-`predict_noise`-per-solver-step contract: `sample_euler`, `sample_euler_ancestral`, `sample_euler_flow`, `sample_lcm`, `sample_dpmpp_2m_sde`, `sample_dpmpp_3m_sde`, `euler_flow`, and `Flux2JiTSamplerImpl`. Other samplers fall back to native ComfyUI FLUX.
 - It depends on current ComfyUI FLUX internals staying broadly compatible with the present `forward_orig` signature.
 - It is designed to coexist with standard transformer patch chains, but it is **not guaranteed** to compose with other custom nodes that also replace FLUX `forward_orig` directly.
 - The scheduler is faithful to the official adaptive-window strategy, but one safety approximation is added: forecasting is held back until enough real points exist to fit the chosen Chebyshev degree.

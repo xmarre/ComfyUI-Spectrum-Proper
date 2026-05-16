@@ -14,7 +14,7 @@ class SpectrumConfig:
     flex_window: float = 0.75
     warmup_steps: int = 5
     tail_actual_steps: int = 3
-    max_history: int = 128
+    max_history: int = 32
     debug: bool = False
 
     def validate(self) -> "SpectrumConfig":
